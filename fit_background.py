@@ -616,7 +616,7 @@ class FitBackground:
                             region_frequency,
                             region_power,
                             p0=initial_vars,
-                            bounds=numax_gaussian_bounds
+                            # bounds=numax_gaussian_bounds
                         )
                         break
                     except ValueError:
@@ -870,7 +870,7 @@ class FitBackground:
         ax3.plot(self.frequency[self.frequency > self.envelope_edges[1]], self.smooth_power[self.frequency > self.envelope_edges[1]], "r-", linewidth=0.75, zorder=1)
         for r in range(self.num_laws):
             ax3.plot(self.frequency, harvey(self.frequency, [self.fitted_harvey_parameters[2*r], self.fitted_harvey_parameters[2*r + 1], self.fitted_harvey_parameters[-1]]), color="blue", linestyle=":", linewidth=1.5, zorder=3)
-        ax3.plot(self.frequency, harvey(self.frequency, self.fitted_harvey_parameters, total=True), color="blue", linewidth=2., zorder=4)
+        ax3.plot(self.frequency, harvey(self.frequency, self.fitted_harvey_parameters, total=True), color="blue", linewidth=2.0, zorder=4)
         ax3.errorbar(self.binned_frequency, self.binned_power, yerr=self.binned_error, color="lime", markersize=0.0, fillstyle="none", ls="None", marker="D", capsize=3, ecolor="lime", elinewidth=1, capthick=2, zorder=2)
         ax3.axvline(self.envelope_edges[0], color="darkorange", linestyle="dashed", linewidth=2.0, zorder=1, dashes=(5, 5))
         ax3.axvline(self.envelope_edges[1], color="darkorange", linestyle="dashed", linewidth=2.0, zorder=1, dashes=(5, 5))

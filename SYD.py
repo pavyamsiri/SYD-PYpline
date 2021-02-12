@@ -366,15 +366,19 @@ class PowerSpectrum:
                     print("Finding excess...")
                     measured_numax, measured_dnu, measured_snr, measured_width, measured_times = self.findex.find_excess()
                 # TODO: Change this so it doesn't require findex to be run first
+                if not self.flags["findex"] and self.flags["fitbg"]:
+                    measured_numax = self.targets[target]["numax"]
                 if self.flags["fitbg"]:
                     print("Fitting background...")
-                    # measured_numax = self.targets[target]["numax"]
                     self.fitbg.numax = measured_numax
                     self.fitbg.dnu = estimate_delta_nu_from_numax(measured_numax)
                     self.fitbg.snr = 2
                     self.fitbg.width = WIDTH_SUN*measured_numax/NUMAX_SUN
                     self.fitbg.num_dnus = self.fitbg.width/self.fitbg.dnu
-                    self.fitbg.fit_background()
+                    try:
+                        self.fitbg.fit_background()
+                    except Exception as e:
+                        print(f"While processing target {target} ran into an exception. {e}")
 
 ##########################################################################################
 #                                                                                        #
