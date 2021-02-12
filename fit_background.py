@@ -5,6 +5,7 @@ the large frequency separation (Delta_nu) and oscillation amplitude.
 
 import os
 from typing import Dict, Iterable, Tuple
+import pdb
 
 import numpy as np
 from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
@@ -14,6 +15,8 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm, Normalize, PowerNorm
 from scipy.optimize import curve_fit
 from scipy.stats import chisquare
+# from astropy.io import ascii as astropy_ascii
+import astropy.io
 
 from constants import *
 from functions import *
@@ -412,7 +415,7 @@ class FitBackground:
                 elif (len(convolved_smooth_power) - min_idx) < self.n_rms:
                     a[harvey_idx] = np.mean(convolved_smooth_power[-self.n_rms:])
                 else:
-                    a[harvey_idx] = np.mean(convolved_smooth_power[min_idx - int(self.n_rms/2) : min_idx + int(self.n_rms/2)])
+                    a[harvey_idx] = np.mean(convolved_smooth_power[min_idx - int(self.n_rms/2):min_idx + int(self.n_rms/2)])
 
             for n in range(self.num_laws):
                 harvey_parameters[2*n] = a[n]
@@ -532,7 +535,6 @@ class FitBackground:
             else:
                 # Try to fit Harvey function
                 try:
-                    # pdb.set_trace()
                     harvey_parameters, _cv = curve_fit(
                         self.functions[self.num_laws],
                         self.binned_frequency,
@@ -559,13 +561,13 @@ class FitBackground:
                 print("Retrying...")
                 continue
 
-            final_pars[mc_iteration, 0 : 2*self.num_laws + 1] = harvey_parameters
+            final_pars[mc_iteration, 0:2*self.num_laws + 1] = harvey_parameters
 
             fwhm = sm_par * self.dnu / self.resolution
             # Standard deviation
             sig = fwhm/np.sqrt(8 * np.log(2))
             gauss_kernel = Gaussian1DKernel(int(sig))
-            # Smooth power spectrum before background correction
+            # Smoothed power spectrum before background correction
             pssm = convolve_fft(random_power, gauss_kernel)
 
             # Model of stellar background
@@ -583,14 +585,17 @@ class FitBackground:
             # y-intercept
             y_intercept = (-1.0 * slope * region_frequency[0]) + pssm[self.mask][0]
             corrected = np.array([slope * region_frequency[z] + y_intercept for z in range(len(region_frequency))])
-            corrected_pssm = [pssm[self.mask][z] - corrected[z] + background_model[self.mask][z] for z in range(len(pssm[self.mask]))]
+            corrected_pssm = [
+                pssm[self.mask][z] - corrected[z] + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
+            ]
+            pdb.set_trace()
 
             plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
             ss = np.argsort(plot_x)
             plot_x = plot_x[ss]
             pssm = np.array(corrected_pssm + list(background_model[~self.mask]))
             pssm = pssm[ss]
-            
+
             # Subtract stellar background
             pssm_bgcorr = pssm - background_model
 
@@ -1271,4 +1276,4 @@ class FitBackground:
         """
 
         variables = ["target", "numax(smooth)", "numax(smooth)_err", "maxamp(smooth)", "maxamp(smooth)_err", "numax(gauss)", "numax(gauss)_err", "maxamp(gauss)", "maxamp(gauss)_err", "fwhm", "fwhm_err", "dnu", "dnu_err"]
-        ascii.write(np.array(results), f"{self.path}{self.target}_globalpars.csv", names=variables, delimiter=",", overwrite=True)
+        astropy.io.ascii.write(np.array(results), f"{self.path}{self.target}_globalpars.csv", names=variables, delimiter=",", overwrite=True)

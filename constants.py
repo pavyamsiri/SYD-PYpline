@@ -6,7 +6,7 @@ G = 6.67428e-8
 NUMAX_SUN = 3090.0
 # Solar delta nu
 DNU_SUN = 135.1
-# TODO: Not sure what this means
+# Granulation time scales
 TAU_SUN = [5.2e6, 1.8e5, 1.7e4, 2.5e3, 280.0, 80.0]
 TAU_SUN_SINGLE = [3.8e6, 2.5e5, 1.5e5, 1.0e5, 230.0, 70.0]
 # Solar effective temperature

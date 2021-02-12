@@ -7,25 +7,22 @@ import argparse
 import glob
 import multiprocessing as mp
 import os
-import pdb
 import subprocess
 from typing import Iterable, Tuple
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
-                                 convolve_fft)
-from astropy.io import ascii
-from astropy.stats import mad_std
-from matplotlib.colors import LogNorm, Normalize, PowerNorm
-from matplotlib.ticker import (FormatStrFormatter, MaxNLocator,
-                               MultipleLocator, ScalarFormatter)
-from scipy import interpolate
-from scipy.interpolate import InterpolatedUnivariateSpline
-from scipy.optimize import curve_fit
-from scipy.stats import chisquare
+# from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
+#                                  convolve_fft)
+# from astropy.stats import mad_std
+# from matplotlib.colors import LogNorm, Normalize, PowerNorm
+# from matplotlib.ticker import (FormatStrFormatter, MaxNLocator,
+#                                MultipleLocator, ScalarFormatter)
+# from scipy import interpolate
+# from scipy.interpolate import InterpolatedUnivariateSpline
+# from scipy.optimize import curve_fit
+# from scipy.stats import chisquare
 
 from functions import *
 from constants import *
@@ -41,7 +38,7 @@ DEFAULT_DATA = "Files/data"
 
 def main(args: list) -> None:
     """Main function that assigns tasks to run given by the list of IDs listed in todo.txt.
-    
+
     Parameters
     ----------
     args : list
@@ -49,7 +46,7 @@ def main(args: list) -> None:
     """
 
     args = _parse_args(args)
-    
+
     power_spectrum = PowerSpectrum(
         args.mission,
         args.smoothing_freq,
@@ -325,7 +322,7 @@ class PowerSpectrum:
 
     def set_plot_params(self) -> None:
         """Sets plot styling and parameters."""
-    
+
         plt.style.use("dark_background")
         plt.rcParams.update(
             {
@@ -385,7 +382,6 @@ class PowerSpectrum:
 #                               READING/WRITING TO/FROM FILES                            #
 #                                                                                        #
 ##########################################################################################
-
 
     def get_star_info(self, star_info: str, cols: Iterable[str] = ["rad", "logg", "teff"]) -> None:
         """Loads information about target stars as given in target file.
@@ -529,10 +525,11 @@ class PowerSpectrum:
             # un2[i] : frequency where artefact ends
             # flower : initial frequency to start fitting routine (aka un1[i] - 20)
             # fupper : final frequency to end fitting routine (aka un2[i] + 20)
-            flower, fupper = un1[i] - 20, un2[i] + 20   
+            flower, fupper = un1[i] - 20, un2[i] + 20
             usenoise = np.where(
-                ((f >= flower) & (f <= un1[i])) |\
-                ((f >= un2[i]) & (f <= fupper)))[0]
+                ((f >= flower) & (f <= un1[i])) |
+                ((f >= un2[i]) & (f <= fupper))
+            )[0]
             # Coefficients for linear fit
             m, b = np.polyfit(f[usenoise], a[usenoise], 1)
             # Index of artefact frequencies (ie. 240-380 muHz)
@@ -653,7 +650,7 @@ class PowerSpectrum:
                 # Nyquist bound
                 else:
                     mask *= np.ma.getmask(np.ma.masked_less_equal(fitbg_frequency, nyquist))
-                
+
                 self.fitbg.update_target(
                     target,
                     self.targets[target]["path"],
@@ -669,23 +666,6 @@ class PowerSpectrum:
         else:
             print(f"Error: data not found for target {target}")
             return False
-
-
-
-
-##########################################################################################
-#                                                                                        #
-#                                    PLOTTING ROUTINES                                   #
-#                                                                                        #
-##########################################################################################
-
-
-##########################################################################################
-#                                                                                        #
-#                                       FUNCTIONS                                        #
-#                                                                                        #
-##########################################################################################
-
 
 ##########################################################################################
 #                                                                                        #

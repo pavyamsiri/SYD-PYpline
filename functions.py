@@ -3,13 +3,11 @@ A collection of utility functions used by SYD.py.
 """
 
 from collections import deque
-from typing import Tuple
+from typing import Tuple, Union
 
 import numpy as np
-from astropy.io import ascii
 from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
                                  convolve_fft)
-from scipy.ndimage import filters
 from scipy.special import erf
 
 from constants import *
@@ -43,14 +41,14 @@ def lorentzian(_frequency, pars, _compare=False, _power=None, _error=None):
     return model
 
 
-def harvey(frequency, parameters, mode="regular", gaussian_model=False, total=False):
+def harvey(frequency, params, mode="regular", gaussian_model=False, total=False):
     """Harvey model.
 
     Parameters
     ----------
     frequency : np.ndarray
         frequencies
-    parameters : list
+    params : list
         Harvey model parameters
     mode : str
         regular mode , second mode and fourth mode
@@ -61,30 +59,30 @@ def harvey(frequency, parameters, mode="regular", gaussian_model=False, total=Fa
     """
 
     if gaussian_model:
-        nlaws = int((len(parameters)-6)/2.0)
+        nlaws = int((len(params)-6)/2.0)
     else:
-        nlaws = int((len(parameters)-1)/2.0)
+        nlaws = int((len(params)-1)/2.0)
     model = np.zeros_like(frequency)
 
     # Sums over all power laws
     if mode == "regular":
         for i in range(nlaws):
-            model += parameters[i * 2]/(1.0 + (parameters[(i * 2) + 1] * frequency)**2.0 + (parameters[(i * 2) + 1] * frequency)**4.0)
+            model += params[i * 2]/(1.0 + (params[(i * 2) + 1] * frequency)**2.0 + (params[(i * 2) + 1] * frequency)**4.0)
     # Sum only over second power law
     elif mode == "second":
         for i in range(nlaws):
-            model += parameters[i * 2]/(1.0 + (parameters[(i * 2) + 1] * frequency)**2.0)
+            model += params[i * 2]/(1.0 + (params[(i * 2) + 1] * frequency)**2.0)
     # Sum only over fourth power law
     elif mode == "fourth":
         for i in range(nlaws):
-            model += parameters[i * 2]/(1.0 + (parameters[(i * 2) + 1] * frequency)**4.0)
+            model += params[i * 2]/(1.0 + (params[(i * 2) + 1] * frequency)**4.0)
     else:
         print("Wrong mode input for the harvey model function.")
 
     if gaussian_model:
-        model += gaussian_skew(frequency, parameters[2*nlaws + 1:])
+        model += gaussian_skew(frequency, params[2*nlaws + 1:])
     if total:
-        model += parameters[2*nlaws]
+        model += params[2*nlaws]
     return model
 
 
@@ -92,7 +90,7 @@ def generate_model(frequency, pars, pars_errs, nyquist):
     """
     Generates model.
     """
-    
+
     ps = np.zeros_like(frequency)
 
     for i, f in enumerate(frequency):
@@ -112,7 +110,13 @@ def generate_model(frequency, pars, pars_errs, nyquist):
     return list(ps)
 
 
-def gaussian(frequency: np.ndarray, offset: float, amplitude: float, center: float, width: float) -> np.ndarray:
+def gaussian(
+        frequency: np.ndarray,
+        offset: float,
+        amplitude: float,
+        center: float,
+        width: float
+) -> Union[np.ndarray, np.float64]:
     """General Gaussian function.
 
     Parameters:
@@ -129,6 +133,7 @@ def gaussian(frequency: np.ndarray, offset: float, amplitude: float, center: flo
 
     Returns
     -------
+        gaussian : np.ndarray | np.float64
     Gaussian of frequency
     """
 
@@ -137,7 +142,7 @@ def gaussian(frequency: np.ndarray, offset: float, amplitude: float, center: flo
 
 def harvey_one(frequency: np.ndarray, a1: float, b1: float, white_noise: float) -> np.ndarray:
     """First Harvey model.
-    
+
     Parameters
     ----------
     frequency : np.ndarray
@@ -148,7 +153,7 @@ def harvey_one(frequency: np.ndarray, a1: float, b1: float, white_noise: float) 
         represents `2 * pi * tau`
     white_noise : float
         white noise component
-    
+
     Returns
     -------
     model : np.ndarray
@@ -196,7 +201,16 @@ def harvey_two(frequency: np.ndarray, a1: float, b1: float, a2: float, b2: float
     return model
 
 
-def harvey_three(frequency: np.ndarray, a1: float, b1: float, a2: float, b2: float, a3: float, b3: float, white_noise: float) -> np.ndarray:
+def harvey_three(
+        frequency: np.ndarray,
+        a1: float,
+        b1: float,
+        a2: float,
+        b2: float,
+        a3: float,
+        b3: float,
+        white_noise: float
+) -> np.ndarray:
     """Third Harvey model.
 
     Parameters
@@ -234,21 +248,31 @@ def harvey_three(frequency: np.ndarray, a1: float, b1: float, a2: float, b2: flo
     return model
 
 
-def gaussian_skew(frequency, parameters):
+def gaussian_skew(frequency: np.ndarray, params: list) -> np.ndarray:
     """Gaussian skew model.
-    
+
     Parameters
     ----------
     frequency : np.ndarray
         frequencies
-    parameters : list
+    params : list
         function parameters
+
+    Returns
+    -------
+    model : np.ndarray
+        Gaussian skew model
     """
-    
-    # TODO: Delete comment
-    # Don't understand how this even works. Gaussian isn't supplied enough arguments and I'm not sure where x gets defined.
+
+    offset, amplitude, center, width = params
+
     model = np.array(
-        [2.0 * gaussian(f, parameters[0:4]) * 0.5*(1.0 + erf(parameters[4] * ((frequency - parameters[1])/parameters[2])/np.sqrt(2.0))) for f in frequency]
+        [
+            2.0
+            * gaussian(f, offset, amplitude, center, width)
+            * 0.5
+            * (1.0 + erf(width * ((frequency - amplitude)/center)/np.sqrt(2.0))) for f in frequency
+        ]
     )
 
     return model
@@ -372,7 +396,7 @@ def smooth(array, width, params, method="box", mode=None, fft=False, silent=Fals
         forward = array[:].tolist()
         reverse = array[::-1].tolist()
 
-        if n%4 != 0:
+        if n % 4 != 0:
             start = int(np.ceil(n/4))
         else:
             start = int(n/4)
@@ -384,7 +408,7 @@ def smooth(array, width, params, method="box", mode=None, fft=False, silent=Fals
             kernel = Gaussian1DKernel(width)
         else:
             width = int(np.ceil(width/params["resolution"]))
-            kernel = Gaussian1DKernel(width, mode = mode)
+            kernel = Gaussian1DKernel(width, mode=mode)
 
         if fft:
             smoothed = convolve_fft(final, kernel)
@@ -394,7 +418,7 @@ def smooth(array, width, params, method="box", mode=None, fft=False, silent=Fals
         smoothed_array = smoothed[int(n/4):int(3*n/4)]
 
         if not silent:
-            print("%s kernel: sigma = %.2f muHz"%(method, width*params["resolution"]))
+            print("%s kernel: sigma = %.2f muHz" % (method, width*params["resolution"]))
             print(f"{method} kernel: sigma = {width*params['resolution']:.2f} muHz")
     else:
         print("Do not understand the smoothing method chosen.")
@@ -427,7 +451,7 @@ def max_elements(array, N, resolution, limit=[False, None]):
     return np.array(indices)
 
 
-def smooth_gauss(array, fwhm, params, silent = False):
+def smooth_gauss(array, fwhm, params, silent=False):
     """
     Smooths using Gaussian convolution.
     """
@@ -435,7 +459,7 @@ def smooth_gauss(array, fwhm, params, silent = False):
     sigma = fwhm/np.sqrt(8.*np.log(2.))
 
     n = 2*len(array)
-    N = np.arange(1,n+1,1)
+    N = np.arange(1, n + 1, 1)
     mu = len(array)
     total = np.sum((1./(sigma*np.sqrt(2.*np.pi)))*np.exp(-0.5*(((N-mu)/sigma)**2.)))
     weights = ((1./(sigma*np.sqrt(2.*np.pi)))*np.exp(-0.5*(((N-mu)/sigma)**2.)))/total
@@ -456,7 +480,7 @@ def smooth_gauss(array, fwhm, params, silent = False):
     smoothed = np.array(dq)
     smoothed_array = smoothed[int(n/4):int(3*n/4)]
     if not silent:
-        print("gaussian kernel using ffts: sigma = %.2f muHz"%(sigma*params["resolution"]))
+        print("gaussian kernel using ffts: sigma = %.2f muHz" % (sigma*params["resolution"]))
     if params["edge"][0]:
         smoothed_array = smoothed_array[:-params["edge"][1]]
 
@@ -470,22 +494,22 @@ def corr(frequency, power, params):
 
     _f = frequency[:]
     p = power[:]
-        
+
     n = len(p)
     mean = np.mean(p)
-    _var = np.var(p)   
+    _var = np.var(p)
     N = np.arange(n)
-    
+
     lag = N*params["resolution"]
-    
-    auto = np.correlate(p - mean, p - mean, "full")    
+
+    auto = np.correlate(p - mean, p - mean, "full")
     auto = auto[int(auto.size/2):]
 
     mask = np.ma.getmask(np.ma.masked_inside(lag, params["fitbg"]["lower_lag"], params["fitbg"]["upper_lag"]))
-    
+
     lag = lag[mask]
     auto = auto[mask]
-    
+
     return lag, auto
 
 

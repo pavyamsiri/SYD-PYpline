@@ -81,7 +81,7 @@ class FindExcess:
         self.lower: float = lower
         self.upper: float = upper
         self.num_trials: int = num_trials
-        
+
         # Number of rows of ACF trial plots
         total_plots = self.num_trials + 3
         if total_plots % 3 == 0:
@@ -108,14 +108,13 @@ class FindExcess:
         # Background corrected power
         self.bgcorr_power: np.ndarray = None
         # ACF trials
-        self.mean_frequencies: Iterable[np.ndarray] = None # Used to be md. Not sure what it means
+        self.mean_frequencies: Iterable[np.ndarray] = None  # Used to be md. Not sure what it means
         self.cumulative_sums: Iterable[np.ndarray] = None
         self.fitted_frequencies: Iterable[np.ndarray] = None
         self.fitted_power: Iterable[np.ndarray] = None
         self.fitted_numax: Iterable[float] = None
         self.fitted_gauss: Iterable[float] = None
         self.fitted_snr: Iterable[float] = None
-
 
     def update_target(
             self,
@@ -182,8 +181,9 @@ class FindExcess:
                 os.makedirs(self.path)
 
     def find_excess(self) -> Tuple[float, float, float, float, float]:
-        """Automatically finds power excess due to solar-like oscillations using a frequency resolved collapsed autocorrelation function.
-        
+        """Automatically finds power excess due to solar-like oscillations using a frequency resolved
+        collapsed autocorrelation function.
+
         Returns
         -------
         measured_numax : float
@@ -348,7 +348,7 @@ class FindExcess:
 
         # Create new figure
         plt.figure(figsize=(12, 8))
-       
+
         # Top left: light curve
         ax1 = plt.subplot(1 + self.num_rows, 3, 1)
         ax1.plot(self.time, self.flux, "w-")
@@ -386,7 +386,7 @@ class FindExcess:
         # ACF trials to determine numax
         for idx in range(self.num_trials):
             xran = max(self.fitted_frequencies[idx]) - min(self.fitted_frequencies[idx])
-            
+
             ymax = max(
                 max(self.cumulative_sums[idx]),
                 max(self.fitted_power[idx])
