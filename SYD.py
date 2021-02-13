@@ -26,6 +26,7 @@ import pandas as pd
 
 from functions import *
 from constants import *
+from target_data import TargetData
 from find_excess import FindExcess
 from fit_background import FitBackground
 
@@ -86,6 +87,7 @@ def main(args: list) -> None:
     return
 
 
+# Argument parsing
 def _parse_args(args: list) -> argparse.Namespace:
     """Parses command line arguments.
 
@@ -126,7 +128,7 @@ def _parse_args(args: list) -> argparse.Namespace:
     parser.add_argument(
         "-m", "--m", "-ms", "--ms", "-mission", "--mission",
         help="Mission used to collect data. Options: Kepler, TESS, K2. Default is Kepler.",
-        choices=["Kepler", "TESS", "K2"], default="Kepler", dest="mission"
+        choices=["Kepler", "TESS", "K2"], default="TESS", dest="mission"
     )
     parser.add_argument(
         "-v", "--v", "-verbose", "--verbose",
@@ -204,6 +206,34 @@ def _is_valid_folder(parser, path):
         parser.error(f"The directory at the path {path} does not exist!")
     else:
         return path
+
+
+# Utility functions
+def _get_file(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Loads light curve and power spectrum data files.
+
+    Parameters
+    ----------
+    path : str
+        file path of either light curve or power spectrum data
+
+    Returns
+    -------
+    x : np.ndarray
+        time in case of light curves and frequency in case of power spectra
+    y : np.ndarray
+        flux in case of light curves and power in case of power spectra
+    """
+
+    f = open(path, "r")
+    lines = f.readlines()
+    f.close()
+
+    x = np.array([float(line.strip().split()[0]) for line in lines])
+    y = np.array([float(line.strip().split()[1]) for line in lines])
+
+    return x, y
+
 
 ##########################################################################################
 #                                                                                        #
@@ -357,25 +387,29 @@ class PowerSpectrum:
         """
 
         for target in targets:
-            if self.load_data(target):
+            target_data = self.load_data(target)
+            if target_data is not None:
+                # Given star info data
+                numax = self.targets[target]["numax"]
+                dnu = self.targets[target]["dnu"]
+                # Default snr TODO: Change default value?
+                snr = 2
                 print(f"Processing target {target}...")
                 if self.flags["findex"]:
                     print("Finding excess...")
-                    measured_numax, measured_dnu, measured_snr, measured_width, measured_times = self.findex.find_excess()
-                # TODO: Change this so it doesn't require findex to be run first
-                if not self.flags["findex"] and self.flags["fitbg"]:
-                    measured_numax = self.targets[target]["numax"]
+                    # Load target data into the find excess routine
+                    self.findex.update_target(target_data)
+                    # Override previous guesses with the find excess routine's results
+                    numax, snr, dnu = self.findex.find_excess()
                 if self.flags["fitbg"]:
                     print("Fitting background...")
-                    self.fitbg.numax = measured_numax
-                    self.fitbg.dnu = estimate_delta_nu_from_numax(measured_numax)
-                    self.fitbg.snr = 2
-                    self.fitbg.width = WIDTH_SUN*measured_numax/NUMAX_SUN
-                    self.fitbg.num_dnus = self.fitbg.width/self.fitbg.dnu
-                    try:
-                        self.fitbg.fit_background()
-                    except Exception as e:
-                        print(f"While processing target {target} ran into an exception. {e}")
+                    # Load target data, numax, snr and dnu into the find excess routine
+                    self.fitbg.update_target(target_data, numax, snr, dnu)
+                    completed = self.fitbg.fit_background()
+                    # try:
+                    #     self.fitbg.fit_background()
+                    # except Exception as e:
+                    #     print(f"While processing target {target} ran into an exception. {e}")
 
 ##########################################################################################
 #                                                                                        #
@@ -428,31 +462,6 @@ class PowerSpectrum:
                             self.targets[current_id]["rad"],
                             self.targets[current_id]["mass"]
                         )
-
-    def get_file(self, path: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Loads light curve and power spectrum data files.
-
-        Parameters
-        ----------
-        path : str
-            file path of either light curve or power spectrum data
-
-        Returns
-        -------
-        x : np.ndarray
-            time in case of light curves and frequency in case of power spectra
-        y : np.ndarray
-            flux in case of light curves and power in case of power spectra
-        """
-
-        f = open(path, "r")
-        lines = f.readlines()
-        f.close()
-
-        x = np.array([float(line.strip().split()[0]) for line in lines])
-        y = np.array([float(line.strip().split()[1]) for line in lines])
-
-        return x, y
 
     def remove_artefact(
             self,
@@ -539,7 +548,7 @@ class PowerSpectrum:
         # Set new amplitude
         return a
 
-    def load_data(self, target: str) -> None:
+    def load_data(self, target: str) -> TargetData:
         """Loads light curve and power spectrum data of the current target.
 
         Parameters
@@ -550,39 +559,40 @@ class PowerSpectrum:
 
         # Now done at beginning to make sure it only does this one per target
         if glob.glob(f"{self.data_folder}/{target}_*") != []:
-            # Load light curve
-            if not os.path.exists(f"{self.data_folder}/{target}_LC.txt"):
+            # Check if light curve files exist
+            if not os.path.isfile(f"{self.data_folder}/{target}_LC.txt"):
                 if self.flags["verbose"]:
                     print(f"Error: {self.data_folder}/{target}_LC.txt not found")
-                return False
-            else:
-                lc_time, lc_flux = self.get_file(f"{self.data_folder}/{target}_LC.txt")
-                # Calculate cadence in seconds
-                cadence = int(np.nanmedian(np.diff(lc_time) * 24.0 * 60.0 * 60.0))
-                # Calculate Nyquist frequency in muHz
-                nyquist = 10**6/(2.0*cadence)
-                if self.flags["verbose"]:
-                    print(f"# LIGHT CURVE: {len(lc_time)} lines of data read")
-
-            # load power spectrum
-            if not os.path.exists(f"{self.data_folder}/{target}_PS.txt"):
+                return None
+            # Check if power spectrum files exist
+            if not os.path.isfile(f"{self.data_folder}/{target}_PS.txt"):
                 if self.flags["verbose"]:
                     print(f"Error: {self.data_folder}/{target}_PS.txt not found")
-                return False
-            else:
-                ps_frequency, ps_power = self.get_file(f"{self.data_folder}/{target}_PS.txt")
-                # Calculate oversample factor and resolution
-                oversample = int(round((1.0/((max(lc_time) - min(lc_time))*0.0864))/(ps_frequency[1] - ps_frequency[0])))
-                resolution = (ps_frequency[1] - ps_frequency[0]) * oversample
+                return None
 
-                # Remove artefacts for Kepler targets
-                if self.mission == "Kepler":
-                    # ps_power = self.remove_artefact(lc_time, ps_frequency, ps_power, resolution)
-                    # if self.flags["verbose"]:
-                    #     print(f"Removing artefacts from {self.mission} data.")
-                    print("Unsupported currently...")
-                if self.flags["verbose"]:
-                    print(f"# POWER SPECTRUM: {len(ps_frequency)} lines of data read")
+            # Load light curve
+            lc_time, lc_flux = _get_file(f"{self.data_folder}/{target}_LC.txt")
+            # Calculate cadence in seconds
+            cadence = int(np.nanmedian(np.diff(lc_time) * 24.0 * 60.0 * 60.0))
+            # Calculate Nyquist frequency in muHz
+            nyquist = 10**6 / (2.0*cadence)
+            if self.flags["verbose"]:
+                print(f"# LIGHT CURVE: {len(lc_time)} lines of data read")
+
+            # load power spectrum
+            ps_frequency, ps_power = _get_file(f"{self.data_folder}/{target}_PS.txt")
+            # Calculate oversample factor and resolution
+            oversample = int(round((1.0/((max(lc_time) - min(lc_time))*0.0864))/(ps_frequency[1] - ps_frequency[0])))
+            resolution = (ps_frequency[1] - ps_frequency[0]) * oversample
+
+            # Remove artefacts for Kepler targets
+            if self.mission == "Kepler":
+                # ps_power = self.remove_artefact(lc_time, ps_frequency, ps_power, resolution)
+                # if self.flags["verbose"]:
+                #     print(f"Removing artefacts from {self.mission} data.")
+                print("Unsupported currently...")
+            if self.flags["verbose"]:
+                print(f"# POWER SPECTRUM: {len(ps_frequency)} lines of data read")
 
             if self.flags["verbose"]:
                 print("-------------------------------------------------")
@@ -595,77 +605,21 @@ class PowerSpectrum:
                 print(f"power spectrum resolution: {resolution:.6f} muHz")
                 print("-------------------------------------------------")
 
-            # Set current target data for the find excess routine
-            if self.flags["findex"]:
-                # Power spectrum data
-                mask = np.ones_like(ps_frequency, dtype=bool)
-                # Lower frequency bound
-                if self.findex.lower is not None:
-                    mask *= np.ma.getmask(
-                        np.ma.masked_greater_equal(ps_frequency, self.findex.lower)
-                    )
-                # Upper frequency bound
-                if self.findex.upper is not None:
-                    mask *= np.ma.getmask(
-                        np.ma.masked_less_equal(ps_frequency, self.findex.upper)
-                    )
-                # Nyquist bound
-                else:
-                    mask *= np.ma.getmask(np.ma.masked_less_equal(ps_frequency, nyquist))
-
-                # Update target of findex
-                self.findex.update_target(
-                    target,
-                    self.targets[target]["path"],
-                    np.copy(lc_time),
-                    np.copy(lc_flux),
-                    np.copy(ps_frequency[mask]),
-                    np.copy(ps_power[mask]),
-                    resolution/oversample,
-                    cadence/60.0 < 10.0
-                )
-
-            # Set current target data for the fit background routine
-            if self.flags["fitbg"]:
-                # Create critically sampled PS
-                if oversample != 1:
-                    fitbg_frequency = np.array(ps_frequency[oversample-1::oversample])
-                    fitbg_power = np.array(ps_power[oversample-1::oversample])
-                else:
-                    fitbg_frequency = np.copy(ps_frequency)
-                    fitbg_power = np.copy(ps_power)
-
-                # Power spectrum data
-                mask = np.ones_like(fitbg_frequency, dtype=bool)
-                # Lower frequency bound
-                if self.fitbg.lower is not None:
-                    mask *= np.ma.getmask(
-                        np.ma.masked_greater_equal(fitbg_frequency, self.fitbg.lower)
-                    )
-                # Upper frequency bound
-                if self.fitbg.upper is not None:
-                    mask *= np.ma.getmask(
-                        np.ma.masked_less_equal(fitbg_frequency, self.fitbg.upper)
-                    )
-                # Nyquist bound
-                else:
-                    mask *= np.ma.getmask(np.ma.masked_less_equal(fitbg_frequency, nyquist))
-
-                self.fitbg.update_target(
-                    target,
-                    self.targets[target]["path"],
-                    np.copy(lc_time),
-                    np.copy(lc_flux),
-                    fitbg_frequency[mask],
-                    fitbg_power[mask],
-                    resolution,
-                    nyquist
-                )
-
-            return True
+            return TargetData(
+                target,
+                self.targets[target]["path"],
+                lc_time,
+                lc_flux,
+                cadence,
+                nyquist,
+                ps_frequency,
+                ps_power,
+                oversample,
+                resolution
+            )
         else:
             print(f"Error: data not found for target {target}")
-            return False
+            return None
 
 ##########################################################################################
 #                                                                                        #

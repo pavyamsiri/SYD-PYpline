@@ -4,6 +4,7 @@ using a frequency resolved collapsed autocorrelation function.
 """
 
 import os
+from target_data import TargetData
 from typing import Iterable, Tuple, Dict
 
 from astropy.io import ascii
@@ -14,6 +15,7 @@ from matplotlib import pyplot as plt
 
 from functions import *
 from constants import *
+from target_data import TargetData
 
 ##########################################################################################
 #                                                                                        #
@@ -118,48 +120,43 @@ class FindExcess:
 
     def update_target(
             self,
-            target: str,
-            path: str,
-            time: np.ndarray,
-            flux: np.ndarray,
-            frequency: np.ndarray,
-            power: np.ndarray,
-            resolution: float,
-            short_cadence: bool
+            target_data: TargetData
     ) -> None:
         """Updates current target.
 
         Parameters
         ----------
-        target : str
-            target to be processed
-        path : str
-            target path
-        time : np.ndarray
-            light curve times
-        flux : np.ndarray
-            light curve fluxes
-        frequency : np.ndarray
-            power spectrum frequencies
-        power : np.ndarray
-            power spectrum power
-        resolution : float
-            frequency resolution of power spectrum
-        short_cadence : bool
-            true if the cadence is less than 10 minutes otherwise false
+        target_data : TargetData
+            file, time series and power spectrum data of the new target
         """
 
         # Initialise target data
-        self.target = target
-        self.path = path
+        self.target = target_data.target
+        self.path = target_data.path
+
         # Time series
-        self.time = time
-        self.flux = flux
-        self.resolution = resolution
-        self.short_cadence = short_cadence
+        self.time = np.copy(target_data.lc_time)
+        self.flux = np.copy(target_data.lc_flux)
+        self.short_cadence = target_data.cadence/60.0 < 10.0
+
         # Power spectrum
-        self.frequency = frequency
-        self.power = power
+        mask = np.ones_like(target_data.ps_frequency, dtype=bool)
+        # Lower frequency bound
+        if self.lower is not None:
+            mask *= np.ma.getmask(
+                np.ma.masked_greater_equal(target_data.ps_frequency, self.lower)
+            )
+        # Upper frequency bound
+        if self.upper is not None:
+            mask *= np.ma.getmask(
+                np.ma.masked_less_equal(target_data.ps_frequency, self.upper)
+            )
+        # Nyquist bound
+        else:
+            mask *= np.ma.getmask(np.ma.masked_less_equal(target_data.ps_frequency, target_data.nyquist))
+        self.frequency = np.copy(target_data.ps_frequency[mask])
+        self.power = np.copy(target_data.ps_power[mask])
+        self.resolution = target_data.resolution/target_data.oversample
 
         # Clear arrays
         self.binned_frequency = None
@@ -180,7 +177,7 @@ class FindExcess:
             if not os.path.isdir(self.path):
                 os.makedirs(self.path)
 
-    def find_excess(self) -> Tuple[float, float, float, float, float]:
+    def find_excess(self) -> Tuple[float, float, float]:
         """Automatically finds power excess due to solar-like oscillations using a frequency resolved
         collapsed autocorrelation function.
 
@@ -188,14 +185,10 @@ class FindExcess:
         -------
         measured_numax : float
             the measured numax of the highest S/N ACF trial
-        measured_dnu : float
-            the measured dnu of the highest S/N ACF trial calculated from the measured numax
         measured_snr : float
             the S/N of the best fitting ACF trial
-        measured_width : float
-            the measured power envelope width
-        measured_times : float
-            the number of large frequency spacings in the power envelope
+        measured_dnu : float
+            the measured dnu of the highest S/N ACF trial calculated from the measured numax
         """
 
         if self.bin_width is not None:
@@ -315,15 +308,10 @@ class FindExcess:
             measured_dnu = results[best_model][2]
             measured_snr = results[best_model][3]
 
-            # Width of solar-like oscillations
-            measured_width = WIDTH_SUN * (measured_numax / NUMAX_SUN)
-            # Number of large frequency separations
-            measured_times = measured_width / measured_dnu
-
             # Plot results
             self.plot_findex()
 
-            return measured_numax, measured_dnu, measured_snr, measured_width, measured_times
+            return measured_numax, measured_snr, measured_dnu
 
     def write_excess(self, results: list) -> None:
         """Writes result of find excess routine to output file.
