@@ -46,7 +46,7 @@ class FitBackground:
             save: bool = True,
             verbose: bool = False,
             show_plots: bool = False,
-            num_mc_iter: int = 20,
+            num_mc_iter: int = 3,
             lower: float = 10.0,
             upper: float = None,
             box_filter: float = 1.0,
@@ -388,7 +388,6 @@ class FitBackground:
         # Monte-Carlo sampling
         mc_iteration = 0
         while mc_iteration < self.num_mc_iter:
-            print(f"{self.target}: MC iteration = {mc_iteration}")
             # Second iteration or later
             if mc_iteration > 0:
                 # Randomize power spectrum to get uncertainty on measured values
@@ -457,8 +456,8 @@ class FitBackground:
                         bounds[0][z] = -np.inf
                         bounds[1][z] = np.inf
                     # Last law is bounded in an interval 0.2 wide centered around the estimated noise level
-                    bounds[0][-1] = harvey_parameters[-1] - 0.1
-                    bounds[1][-1] = harvey_parameters[-1] + 0.1
+                    bounds[0][-1] = harvey_parameters[-1] - 0.01
+                    bounds[1][-1] = harvey_parameters[-1] + 0.01
                     bounds_list.append(tuple(bounds))
 
                 reduced_chi2 = []
@@ -531,7 +530,14 @@ class FitBackground:
                     # Replace parameters with the best model's fitted parameters
                     self.fitted_harvey_parameters = fitted_parameters_list[model]
                     best_bounds = bounds_list[self.num_laws - 1]
-                    final_pars = np.zeros((self.num_mc_iter, 2*self.num_laws + 12))
+                    # Final parameters
+                    harvey_parameters_list = np.zeros((self.num_mc_iter, 2*self.num_laws + 1))
+                    smooth_numax_list = np.zeros(self.num_mc_iter)
+                    smooth_amp_list = np.zeros(self.num_mc_iter)
+                    gaussian_numax_list = np.zeros(self.num_mc_iter)
+                    gaussian_amp_list = np.zeros(self.num_mc_iter)
+                    gaussian_fwhm_list = np.zeros(self.num_mc_iter)
+                    deltanu_list = np.zeros(self.num_mc_iter)
 
                     # Lower bound is 1.0
                     sm_par = max(4.0*(self.numax / NUMAX_SUN)**0.2, 1.0)
@@ -573,7 +579,7 @@ class FitBackground:
                 print("Retrying...")
                 continue
 
-            final_pars[mc_iteration, 0:2*self.num_laws + 1] = harvey_parameters
+            harvey_parameters_list[mc_iteration, :] = harvey_parameters
 
             fwhm = sm_par * self.dnu / self.resolution
             # Standard deviation
@@ -614,40 +620,27 @@ class FitBackground:
             region_power = pssm_bgcorr[self.mask]
             # Index of maximum power i.e. numax estimation
             idx = self.return_max(region_power, index=True)
-            final_pars[mc_iteration, 2*self.num_laws + 1] = region_frequency[idx]
-            final_pars[mc_iteration, 2*self.num_laws + 2] = region_power[idx]
+            smooth_numax_list[mc_iteration] = region_frequency[idx]
+            smooth_amp_list[mc_iteration] = region_power[idx]
 
             if list(region_frequency) != []:
-                numax_gaussian_bounds = self.gaussian_bounds(region_frequency, region_power)
+                # numax_gaussian_bounds = self.gaussian_bounds(region_frequency, region_power)
                 initial_vars = [
                     0.0,
                     max(region_power),
                     region_frequency[idx],
                     (max(region_frequency) - min(region_frequency))/8.0/np.sqrt(8.0*np.log(2.0))
                 ]
-                while True:
-                    try:
-                        # Fit Gaussian to the background corrected power envelope to find numax
-                        numax_gaussian_parameters, _cv = curve_fit(
-                            gaussian,
-                            region_frequency,
-                            region_power,
-                            p0=initial_vars,
-                            # bounds=numax_gaussian_bounds
-                        )
-                        break
-                    except ValueError:
-                        print("Updating numax Gaussian's parameters bounds...")
-                        numax_gaussian_bounds[0][0] -= 0.1
-                        numax_gaussian_bounds[0][1] -= 0.1
-                        numax_gaussian_bounds[0][2] -= 0.1
-                        numax_gaussian_bounds[1][0] += 0.1
-                        numax_gaussian_bounds[1][1] += 0.1
-                        numax_gaussian_bounds[1][2] += 0.1
+                numax_gaussian_parameters, _cv = curve_fit(
+                    gaussian,
+                    region_frequency,
+                    region_power,
+                    p0=initial_vars,
+                )
                 offset, amplitude, center, width = numax_gaussian_parameters
-                final_pars[mc_iteration, 2*self.num_laws + 3] = center
-                final_pars[mc_iteration, 2*self.num_laws + 4] = amplitude
-                final_pars[mc_iteration, 2*self.num_laws + 5] = width
+                gaussian_numax_list[mc_iteration] = center
+                gaussian_amp_list[mc_iteration] = amplitude
+                gaussian_fwhm_list[mc_iteration] = width
 
             # Background correction
             self.bg_corr = random_power / background_model
@@ -709,7 +702,7 @@ class FitBackground:
                 self.dnu = zoom_lag[idx]
 
             self.get_ridges(mc_iteration)
-            final_pars[mc_iteration, 2*self.num_laws + 6] = self.dnu
+            deltanu_list[mc_iteration] = self.dnu
 
             if mc_iteration == 0 and not again:
                 self.pssm = pssm
@@ -732,61 +725,70 @@ class FitBackground:
 
         if self.num_mc_iter > 1:
             if self.flags["verbose"]:
-                print(f"numax (smoothed): {final_pars[0, 2*self.num_laws + 1]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 1]):.2f} muHz")
-                print(f"maxamp (smoothed): {final_pars[0, 2*self.num_laws + 2]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 2]):.2f} ppm^2/muHz")
-                print(f"numax (gaussian): {final_pars[0, 2*self.num_laws + 3]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 3]):.2f} muHz")
-                print(f"maxamp (gaussian): {final_pars[0, 2*self.num_laws + 4]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 4]):.2f} ppm^2/muHz")
-                print(f"fwhm (gaussian): {final_pars[0, 2*self.num_laws + 5]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 5]):.2f} muHz")
-                print(f"dnu: {final_pars[0, 2*self.num_laws + 6]:.2f} +/- {mad_std(final_pars[:, 2*self.num_laws + 6]):.2f} muHz")
+                print(f"numax (smoothed): {smooth_numax_list[0]:.2f} +/- {mad_std(smooth_numax_list):.2f} muHz")
+                print(f"maxamp (smoothed): {smooth_amp_list[0]:.2f} +/- {mad_std(smooth_amp_list):.2f} ppm^2/muHz")
+                print(f"numax (gaussian): {gaussian_numax_list[0]:.2f} +/- {mad_std(gaussian_numax_list):.2f} muHz")
+                print(f"maxamp (gaussian): {gaussian_amp_list[0]:.2f} +/- {mad_std(gaussian_amp_list):.2f} ppm^2/muHz")
+                print(f"fwhm (gaussian): {gaussian_fwhm_list[0]:.2f} +/- {mad_std(gaussian_fwhm_list):.2f} muHz")
+                print(f"dnu: {deltanu_list[0]:.2f} +/- {mad_std(deltanu_list):.2f} muHz")
                 print("-------------------------------------------------\n")
 
             results.append(
                 [
                     self.target,
-                    final_pars[0, 2*self.num_laws + 1],
-                    mad_std(final_pars[:, 2*self.num_laws + 1]),
-                    final_pars[0, 2*self.num_laws + 2],
-                    mad_std(final_pars[:, 2*self.num_laws + 2]),
-                    final_pars[0, 2*self.num_laws + 3],
-                    mad_std(final_pars[:, 2*self.num_laws + 3]),
-                    final_pars[0, 2*self.num_laws + 4],
-                    mad_std(final_pars[:, 2*self.num_laws + 4]),
-                    final_pars[0, 2*self.num_laws + 5],
-                    mad_std(final_pars[:, 2*self.num_laws + 5]),
-                    final_pars[0, 2*self.num_laws + 6],
-                    mad_std(final_pars[:, 2*self.num_laws + 6])
+                    smooth_numax_list[0],
+                    mad_std(smooth_numax_list),
+                    smooth_amp_list[0],
+                    mad_std(smooth_amp_list),
+                    gaussian_numax_list[0],
+                    mad_std(gaussian_numax_list),
+                    gaussian_amp_list[0],
+                    mad_std(gaussian_amp_list),
+                    gaussian_fwhm_list[0],
+                    mad_std(gaussian_fwhm_list),
+                    deltanu_list[0],
+                    mad_std(deltanu_list)
                 ]
             )
 
-            self.plot_mc(final_pars)
+            self.plot_mc(
+                [
+                    smooth_numax_list,
+                    smooth_amp_list,
+                    gaussian_numax_list,
+                    gaussian_amp_list,
+                    gaussian_fwhm_list,
+                    deltanu_list
+                ]
+            )
 
         else:
             if again:
                 results.append([self.target, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
             else:
                 if self.flags["verbose"]:
-                    print(f"numax (smoothed): {final_pars[0, 2*self.num_laws + 1]:.2f} muHz")
-                    print(f"maxamp (smoothed): {final_pars[0, 2*self.num_laws + 2]:.2f} ppm^2/muHz")
-                    print(f"numax (gaussian): {final_pars[0, 2*self.num_laws + 3]:.2f} muHz")
-                    print(f"maxamp (gaussian): {final_pars[0, 2*self.num_laws + 4]:.2f} ppm^2/muHz")
-                    print(f"fwhm (gaussian): {final_pars[0, 2*self.num_laws + 5]:.2f} muHz")
-                    print(f"dnu: {final_pars[0, 2*self.num_laws + 6]:.2f} muHz")
+                    print(f"numax (smoothed): {smooth_numax_list[0]:.2f} muHz")
+                    print(f"maxamp (smoothed): {smooth_amp_list[0]:.2f} ppm^2/muHz")
+                    print(f"numax (gaussian): {gaussian_numax_list[0]:.2f} muHz")
+                    print(f"maxamp (gaussian): {gaussian_amp_list[0]:.2f} ppm^2/muHz")
+                    print(f"fwhm (gaussian): {gaussian_fwhm_list[0]:.2f} muHz")
+                    print(f"dnu: {deltanu_list[0]:.2f} muHz")
                     print("-------------------------------------------------\n")
 
                 results.append(
                     [
                         self.target,
-                        final_pars[0, 2*self.num_laws + 1],
+                        smooth_numax_list[0],
                         0.0,
-                        final_pars[0, 2*self.num_laws + 2],
+                        smooth_amp_list[0],
                         0.0,
-                        final_pars[0, 2*self.num_laws + 3],
+                        gaussian_numax_list[0],
                         0.0,
-                        final_pars[0, 2*self.num_laws + 4],
+                        gaussian_amp_list[0],
                         0.0,
-                        final_pars[0, 2*self.num_laws + 5],
+                        gaussian_fwhm_list[0],
                         0.0,
-                        final_pars[0, 2*self.num_laws + 6],
+                        deltanu_list[0],
                         0.0
                     ]
                 )
@@ -929,13 +931,7 @@ class FitBackground:
         idx = self.return_max(self.region_power, index=True)
         ax4.plot([self.region_frequency[idx]], [self.region_power[idx]], color="red", marker="s", markersize=7.5, zorder=0)
         ax4.axvline([self.region_frequency[idx]], color="white", linestyle="--", linewidth=1.5, zorder=0)
-        gaus = gaussian(
-            self.region_frequency,
-            self.numax_gaussian_parameters[0],
-            self.numax_gaussian_parameters[1],
-            self.numax_gaussian_parameters[2],
-            self.numax_gaussian_parameters[3]
-        )
+        gaus = gaussian(self.region_frequency, *self.numax_gaussian_parameters)
         plot_min = 0.0
         if min(self.region_power) < plot_min:
             plot_min = min(self.region_power)
@@ -991,13 +987,7 @@ class FitBackground:
         )
 
         # dnu fit
-        fit = gaussian(
-            self.zoom_lag,
-            self.dnu_gaussian_parameters[0],
-            self.dnu_gaussian_parameters[1],
-            self.dnu_gaussian_parameters[2],
-            self.dnu_gaussian_parameters[3]
-        )
+        fit = gaussian(self.zoom_lag, *self.dnu_gaussian_parameters)
         idx = self.return_max(fit, index=True)
         plot_lower = min(self.zoom_auto)
         if min(fit) < plot_lower:
@@ -1064,9 +1054,15 @@ class FitBackground:
             plt.show()
         plt.close()
 
-    def plot_mc(self, final_pars):
+    def plot_mc(self, mc_data: list) -> None:
         """
-        Plots Markov-Chain/Monte-Carlo simulation.
+        Plots Markov-Chain Monte-Carlo simulation.
+
+        Parameters
+        ----------
+        mc_data : list
+            list of Monte-Carlo simulation data containing smooth numax, smooth amplitude, Gaussian numax, Gaussian amplitude,
+            Gaussian FWHM and deltanu.
         """
 
         plt.figure(figsize=(12, 8))
@@ -1078,11 +1074,11 @@ class FitBackground:
             r"$\rm Gaussian \,\, A_{max} \,\, [ppm^{2} \mu Hz^{-1}]$",
             r"$\rm Gaussian \,\, FWHM \,\, [\mu Hz]$",
             r"$\rm \Delta\nu \,\, [\mu Hz]$"
-            ]
+        ]
 
         for i in range(6):
             ax = plt.subplot(2, 3, i+1)
-            ax.hist(final_pars[:, 2*self.num_laws + (i+1)], color="cyan", histtype="step", lw=2.5, facecolor="0.75")
+            ax.hist(mc_data[i], color="cyan", histtype="step", lw=2.5, facecolor="0.75")
             ax.set_title(titles[i])
 
         plt.tight_layout()
@@ -1365,6 +1361,7 @@ class FitBackground:
             "dnu",
             "dnu_err"
         ]
+
         astropy.io.ascii.write(
             np.array(results),
             f"{self.path}{self.target}_globalpars.csv",
