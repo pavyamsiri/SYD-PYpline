@@ -16,12 +16,12 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm, Normalize, PowerNorm
 from scipy.optimize import curve_fit
 from scipy.stats import chisquare
-# from astropy.io import ascii as astropy_ascii
 import astropy.io
 
 from constants import *
 from functions import *
 from target_data import TargetData
+
 
 ##########################################################################################
 #                                                                                        #
@@ -86,7 +86,7 @@ class FitBackground:
         ind_width : int
             independent average smoothing width
         n_rms : int
-            TODO: Don't know. Likely to do with the number of values to average over when estimating `4 * sigma**2 * tau`
+            the number of points used to calculate RMS of Harvey component
         n_peaks : int
             number of peaks to highlight in plots
         force : bool
@@ -194,7 +194,7 @@ class FitBackground:
         self.zoom_auto: np.ndarray = None
         self.dnu_gaussian_parameters: list = None
 
-        # echelle TODO: finish type hints
+        # echelle
         self.echelle: np.ndarray = None
         self.echelle_copy: np.ndarray = None
         self.extent: list = None
@@ -382,6 +382,8 @@ class FitBackground:
         # Number of power laws
         self.num_laws = len(self.mnu)
         self.num_laws_original = self.num_laws
+        if self.num_laws == 0:
+            raise ValueError(f"{self.target}'s numax ({self.numax:.2f} muHz) is too low!")
 
         # Monte-Carlo sampling
         mc_iteration = 0
@@ -402,14 +404,14 @@ class FitBackground:
                     b = b[:self.num_laws]
 
             # Estimate white noise level
-            self.noise = self.get_white_noise(random_power)
+            self.noise = _get_white_noise(self.frequency, random_power, self.nyquist)
 
             # Exclude region with power excess and smooth to estimate red/white noise components
             boxkernel = Box1DKernel(int(np.ceil(self.box_filter / self.resolution)))
             outer_frequency = self.frequency[~self.mask]
             outer_power = random_power[~self.mask]
             # Smooth outer regions using convolution
-            convolved_smooth_power = convolve(outer_power, boxkernel)
+            outer_smooth_power = convolve(outer_power, boxkernel)
 
             # Used in curve fitting the Harvey models
             harvey_parameters = np.zeros((2*self.num_laws + 1))
@@ -421,11 +423,11 @@ class FitBackground:
             for harvey_idx, nu in enumerate(self.mnu):
                 min_idx = np.argmax(self.frequency >= nu)
                 if min_idx < self.n_rms:
-                    a[harvey_idx] = np.mean(convolved_smooth_power[:self.n_rms])
-                elif (len(convolved_smooth_power) - min_idx) < self.n_rms:
-                    a[harvey_idx] = np.mean(convolved_smooth_power[-self.n_rms:])
+                    a[harvey_idx] = np.mean(outer_smooth_power[:self.n_rms])
+                elif (len(outer_smooth_power) - min_idx) < self.n_rms:
+                    a[harvey_idx] = np.mean(outer_smooth_power[-self.n_rms:])
                 else:
-                    a[harvey_idx] = np.mean(convolved_smooth_power[min_idx - int(self.n_rms/2):min_idx + int(self.n_rms/2)])
+                    a[harvey_idx] = np.mean(outer_smooth_power[min_idx - int(self.n_rms/2):min_idx + int(self.n_rms/2)])
 
             for n in range(self.num_laws):
                 harvey_parameters[2*n] = a[n]
@@ -599,10 +601,6 @@ class FitBackground:
             corrected_pssm = [
                 max(pssm[self.mask][z] - corrected[z], 0) + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
             ]
-
-            # corrected_pssm = [
-            #     pssm[self.mask][z] + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
-            # ]
 
             plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
             ss = np.argsort(plot_x)
@@ -794,35 +792,6 @@ class FitBackground:
                 )
 
         self.write_bgfit(results[0])
-
-    def get_white_noise(self, random_power: np.ndarray) -> np.ndarray:
-        """Get white noise.
-
-        Parameters
-        ----------
-        random_power : np.ndarray
-            randomised power spectrum
-
-        Returns
-        -------
-        noise : np.ndarray
-            white noise sampled depending on the power spectrum's Nyquist frequency
-        """
-
-        # Sample noise
-        if self.nyquist < 400.0:
-            mask = (self.frequency > 200.0) & (self.frequency < 270.0)
-            noise = np.mean(random_power[mask])
-        elif self.nyquist > 400.0 and self.nyquist < 5000.0:
-            mask = (self.frequency > 4000.0) & (self.frequency < 4167.0)
-            noise = np.mean(random_power[mask])
-        elif self.nyquist > 5000.0 and self.nyquist < 9000.0:
-            mask = (self.frequency > 8000.0) & (self.frequency < 8200.0)
-            noise = np.mean(random_power[mask])
-        else:
-            mask = (self.frequency > (0.9 * max(self.frequency))) & (self.frequency < max(self.frequency))
-            noise = np.mean(random_power[mask])
-        return noise
 
     def plot_fitbg(self) -> None:
         """Plots result of fitbg routine."""
@@ -1403,3 +1372,38 @@ class FitBackground:
             delimiter=",",
             overwrite=True
         )
+
+
+# Private functions
+def _get_white_noise(frequency: np.ndarray, random_power: np.ndarray, nyquist: float) -> np.ndarray:
+    """Get white noise.
+
+    Parameters
+    ----------
+    frequency : np.ndarray
+        power spectrum frequency with the same dimensions as random_power
+    random_power : np.ndarray
+        randomised power spectrum
+    nyquist : float
+        the Nyquist frequency of the power spectrum
+
+    Returns
+    -------
+    noise : np.ndarray
+        white noise sampled depending on the power spectrum's Nyquist frequency
+    """
+
+    # Sample noise
+    if nyquist < 400.0:
+        mask = (frequency > 200.0) & (frequency < 270.0)
+        noise = np.mean(random_power[mask])
+    elif nyquist > 400.0 and nyquist < 5000.0:
+        mask = (frequency > 4000.0) & (frequency < 4167.0)
+        noise = np.mean(random_power[mask])
+    elif nyquist > 5000.0 and nyquist < 9000.0:
+        mask = (frequency > 8000.0) & (frequency < 8200.0)
+        noise = np.mean(random_power[mask])
+    else:
+        mask = (frequency > (0.9 * max(frequency))) & (frequency < max(frequency))
+        noise = np.mean(random_power[mask])
+    return noise
