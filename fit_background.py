@@ -4,10 +4,12 @@ the large frequency separation (Delta_nu) and oscillation amplitude.
 """
 
 import os
-from target_data import TargetData
-from typing import Dict, Iterable, Tuple
 import pdb
+import sys
+from typing import Dict, Iterable, Tuple
+from tqdm import tqdm
 
+import astropy.io
 import numpy as np
 from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
                                  convolve_fft)
@@ -16,12 +18,10 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm, Normalize, PowerNorm
 from scipy.optimize import curve_fit
 from scipy.stats import chisquare
-import astropy.io
 
 from constants import *
 from functions import *
 from target_data import TargetData
-
 
 ##########################################################################################
 #                                                                                        #
@@ -46,7 +46,7 @@ class FitBackground:
             save: bool = True,
             verbose: bool = False,
             show_plots: bool = False,
-            num_mc_iter: int = 3,
+            num_mc_iter: int = 50,
             lower: float = 10.0,
             upper: float = None,
             box_filter: float = 1.0,
@@ -348,6 +348,253 @@ class FitBackground:
             if not os.path.isdir(self.path):
                 os.makedirs(self.path)
 
+    def estimate_harvey_parameters(self, random_power: np.ndarray, b: np.ndarray) -> Tuple:
+        """Estimates initial Harvey parameters to use in curve fitting. Runs every Monte-Carlo iteration.
+
+        Parameters
+        ----------
+        random_power : np.ndarray
+            power spectrum power with added noise
+        b : np.ndarray
+            the`2 * pi * tau` terms in the Harvey model
+
+        Returns
+        -------
+        harvey_parameters : np.ndarray
+            initial parameters for the Harvey models
+        a : np.ndarray
+            the `4 * sigma**2 * tau` terms in the Harvey model
+        """
+
+        # Estimate white noise level
+        self.noise = _get_white_noise(self.frequency, random_power, self.nyquist)
+
+        # Exclude region with power excess and smooth to estimate red/white noise components
+        boxkernel = Box1DKernel(int(np.ceil(self.box_filter / self.resolution)))
+        # Smooth outer regions using convolution
+        outer_smooth_power = convolve(random_power[~self.mask], boxkernel)
+
+        # Used in curve fitting the Harvey models
+        harvey_parameters = np.zeros((2*self.num_laws + 1))
+        harvey_parameters[2*self.num_laws] = self.noise
+        # Changes with each iteration. Represents `4 * sigma**2 * tau`
+        a = np.zeros_like(self.mnu)
+
+        # Estimate amplitude for each Harvey component
+        for harvey_idx, nu in enumerate(self.mnu):
+            min_idx = np.argmax(self.frequency >= nu)
+            if min_idx < self.n_rms:
+                a[harvey_idx] = np.mean(outer_smooth_power[:self.n_rms])
+            elif (len(outer_smooth_power) - min_idx) < self.n_rms:
+                a[harvey_idx] = np.mean(outer_smooth_power[-self.n_rms:])
+            else:
+                a[harvey_idx] = np.mean(outer_smooth_power[min_idx - int(self.n_rms/2):min_idx + int(self.n_rms/2)])
+
+        for n in range(self.num_laws):
+            harvey_parameters[2*n] = a[n]
+            harvey_parameters[2*n + 1] = b[n]
+
+        return harvey_parameters, a
+
+    def estimate_smooth_numax(
+            self,
+            sm_par: float,
+            random_power: np.ndarray,
+            harvey_parameters: np.ndarray,
+            smooth_numax_list: np.ndarray,
+            smooth_amp_list: np.ndarray,
+            mc_iteration: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        """
+        Estimates numax by smoothing the power envelope and correcting for the background.
+
+        Parameters
+        ----------
+        sm_par : float
+            TODO: Don't know
+        random_power : float
+            power spectrum power with added noise
+        harvey_parameters : np.ndarray
+            fitted Harvey model parameters
+        smooth_numax_list : np.ndarray
+            list of numax measurements by the smoothing method
+        smooth_amp_list : np.ndarray
+            list of max amplitude measurements by the smoothing methods
+        mc_iteration : int
+            the current iteration of the Monte-Carlo iteration
+
+        Returns
+        -------
+        pssm : np.ndarray
+            smoothed power spectrum including the fitted background
+        region_frequency : np.ndarray
+            frequencies inside the power envelope
+        region_power : np.ndarray
+            the background corrected smooth power spectrum of the power envelope
+        background_model : np.ndarray
+            the fitted background model
+        numax_idx : int
+            the index of the estimated numax frequency
+        """
+
+        fwhm = sm_par * self.dnu / self.resolution
+        # Standard deviation
+        sig = fwhm/np.sqrt(8 * np.log(2))
+        gauss_kernel = Gaussian1DKernel(int(sig))
+        # Smoothed power spectrum before background correction
+        pssm = convolve_fft(random_power, gauss_kernel)
+
+        # Model of stellar background
+        background_model = harvey(self.frequency, harvey_parameters, total=True)
+
+        # Correct for edge effects and residual slope in Gaussian fit
+        region_frequency = np.copy(self.frequency[self.mask])
+
+        # Correction
+        # The difference between the first point of the power envelope and the last point of the power envelope
+        delta_y = pssm[self.mask][-1] - pssm[self.mask][0]
+        # The width of the power envelope
+        delta_x = max(region_frequency) - min(region_frequency)
+        # The general slope of the power envelope
+        slope = delta_y / delta_x
+        # y-intercept
+        y_intercept = (-1.0 * slope * min(region_frequency)) + pssm[self.mask][0]
+        corrected = np.array([slope * region_frequency[z] + y_intercept for z in range(len(region_frequency))])
+        corrected_pssm = [
+            max(pssm[self.mask][z] - corrected[z], 0) + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
+        ]
+
+        plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
+        ss = np.argsort(plot_x)
+        plot_x = plot_x[ss]
+        pssm = np.array(corrected_pssm + list(background_model[~self.mask]))
+        pssm = pssm[ss]
+
+        # Subtract stellar background
+        pssm_bgcorr = pssm - background_model
+
+        region_power = pssm_bgcorr[self.mask]
+        # Index of maximum power i.e. numax estimation
+        numax_idx = _return_max(self.numax, region_power, index=True)
+        smooth_numax_list[mc_iteration] = region_frequency[numax_idx]
+        smooth_amp_list[mc_iteration] = region_power[numax_idx]
+
+        return pssm, region_frequency, region_power, background_model, numax_idx
+
+    def estimate_dnu(
+            self,
+            region_frequency: np.ndarray,
+            random_power: np.ndarray,
+            background_model: np.ndarray,
+            numax_gaussian_parameters: np.ndarray,
+            deltanu_list: np.ndarray,
+            mc_iteration: int
+    ) -> Tuple:
+        """Estimates delta nu using the auto-correlation function.
+
+        Parameters
+        ----------
+        region_frequency : np.ndarray
+            frequencies inside the power envelope
+        random_power : np.ndarray
+            power spectrum power with added noise
+        background_model : np.ndarray
+            the fitted background model
+        numax_gaussian_parameters : np.ndarray
+            the fitted Gaussian parameters used to measure numax
+        deltanu_list : np.ndarray
+            list containing measurements of deltanu
+        mc_iteration : int
+            the current Monte-Carlo iteration
+
+        Returns
+        -------
+        psd : np.ndarray
+            power spectral density
+        lag : np.ndarray
+            frequency lag of deltanu ACF
+        auto : np.ndarray
+            auto-correlation of deltanu ACF
+        best_lag : float
+            frequency lag with highest auto-correlation
+        best_auto : float
+            highest auto-correlation of deltanu ACF
+        lag_peaks : np.ndarray
+            frequency lags that correspond to the first `self.n_peaks` of deltanu ACF
+        auto_peaks : np.ndarray
+            the auto-correlation of the first `self.n_peaks` of deltanu ACF
+        zoom_lag : np.ndarray
+            zoomed in version of `lag`
+        zoom_auto : np.ndarray
+            zoomed in version of `auto`
+        dnu_gaussian_parameters : np.ndarray
+            the parameters of the fitted Gaussian to deltanu ACF
+        """
+
+        # Background correction
+        self.bg_corr = random_power / background_model
+
+        # Optional smoothing of PS to remove fine structure TODO: This doesn't seem to be initialised anywhere
+        if False and self.smooth_ps is not None:
+            boxkernel = Box1DKernel(int(np.ceil(self.smooth_ps / self.resolution)))
+            bg_corr_smooth = convolve(self.bg_corr, boxkernel)
+        else:
+            bg_corr_smooth = np.array(self.bg_corr)
+
+        self.width = WIDTH_SUN * (numax_gaussian_parameters[3] / NUMAX_SUN)
+        self.numax = numax_gaussian_parameters[2]
+        self.sm_par = 4.0 * (self.numax / NUMAX_SUN)**0.2
+        self.dnu = estimate_delta_nu_from_numax(self.numax)
+        self.num_dnus = self.width / self.dnu
+
+        # Frequencies in the power envelope
+        psd = bg_corr_smooth[self.mask]
+        lag, auto = _corr(region_frequency, psd, self.dnu, self.resolution)
+        lag_peaks, auto_peaks = _max_elements(lag, auto, self.n_peaks)
+
+        # Pick the peak closest to the modelled numax
+        idx = _return_max(self.numax, lag_peaks, index=True, dnu=True)
+        best_lag = lag_peaks[idx]
+        best_auto = auto_peaks[idx]
+        lag_peaks[idx] = np.nan
+        auto_peaks[idx] = np.nan
+
+        dnu_gaussian_bounds = _gaussian_bounds(lag, auto, best_x=best_lag, sigma=10**(-2.0))
+        initial_vars = [
+            np.mean(auto),
+            best_auto,
+            best_lag,
+            0.01 * 2.0 * best_lag
+        ]
+        # Fitting Gaussian to ACF to find deltanu
+        dnu_gaussian_parameters, _cv = curve_fit(
+            gaussian,
+            lag,
+            auto,
+            p0=initial_vars,
+            bounds=dnu_gaussian_bounds
+        )
+
+        offset, amplitude, center, width = dnu_gaussian_parameters
+
+        zoom_mask = (lag >= best_lag - 3.0*width) & (lag <= best_lag + 3.0*width)
+        zoom_lag = lag[zoom_mask]
+        zoom_auto = auto[zoom_mask]
+        dnu_fit = gaussian(zoom_lag, offset, amplitude, center, width)
+        idx = _return_max(self.numax, dnu_fit, index=True)
+
+        # Force deltanu measurement to be the initial guess
+        if self.flags["force"]:
+            self.dnu = self.guess
+        # Use deltanu found using ACF
+        else:
+            self.dnu = zoom_lag[idx]
+
+        self.get_ridges(mc_iteration)
+        deltanu_list[mc_iteration] = self.dnu
+
+        return psd, lag, auto, best_lag, best_auto, lag_peaks, auto_peaks, zoom_lag, zoom_auto, dnu_gaussian_parameters
+
     def fit_background(self) -> None:
         """
         Perform a fit to the granulation background and measures the frequency of
@@ -385,343 +632,241 @@ class FitBackground:
         if self.num_laws == 0:
             raise ValueError(f"{self.target}'s numax ({self.numax:.2f} muHz) is too low!")
 
-        # Monte-Carlo sampling
-        mc_iteration = 0
-        while mc_iteration < self.num_mc_iter:
-            # Second iteration or later
-            if mc_iteration > 0:
-                # Randomize power spectrum to get uncertainty on measured values
-                random_power = (np.random.chisquare(2, len(self.frequency)) * self.power)/2.0
-                bin_frequency, bin_power, bin_error = mean_smooth_ind(
-                    self.frequency,
-                    random_power,
-                    self.ind_width
-                )
+        harvey_parameters, a = self.estimate_harvey_parameters(random_power, b)
 
-                if self.num_laws != self.num_laws_original:
-                    self.mnu = self.mnu_original[:self.num_laws]
-                    b = b[:self.num_laws]
+        bin_mask = (bin_frequency > self.envelope_edges[0]) & (bin_frequency < self.envelope_edges[1])
+        self.binned_frequency = bin_frequency[~bin_mask]
+        self.binned_power = bin_power[~bin_mask]
+        self.binned_error = bin_error[~bin_mask]
+        self.a_original = np.copy(a)
+        self.smooth_power = convolve(
+            self.power,
+            Box1DKernel(int(np.ceil(self.box_filter / self.resolution)))
+        )
 
-            # Estimate white noise level
-            self.noise = _get_white_noise(self.frequency, random_power, self.nyquist)
+        if self.flags["verbose"]:
+            print(f"Comparing {2 * self.num_laws} different models:")
 
-            # Exclude region with power excess and smooth to estimate red/white noise components
-            boxkernel = Box1DKernel(int(np.ceil(self.box_filter / self.resolution)))
-            outer_frequency = self.frequency[~self.mask]
-            outer_power = random_power[~self.mask]
-            # Smooth outer regions using convolution
-            outer_smooth_power = convolve(outer_power, boxkernel)
+        # Names of the Harvey models
+        names = ["one", "one", "two", "two", "three", "three"]
+        model_dictionary = dict(zip(np.arange(2 * self.num_laws), names[:2*self.num_laws]))
 
-            # Used in curve fitting the Harvey models
-            harvey_parameters = np.zeros((2*self.num_laws + 1))
-            harvey_parameters[2*self.num_laws] = self.noise
-            # Changes with each iteration. Represents `4 * sigma**2 * tau`
-            a = np.zeros_like(self.mnu)
+        # Get best fit model
+        bounds_list = []
+        for law in range(self.num_laws):
+            # 2x3, 2x5, 2x7 ...
+            bounds = np.zeros((2, 2*(law+1) + 1)).tolist()
+            # Unbounded
+            for z in range(2*(law + 1)):
+                bounds[0][z] = -np.inf
+                bounds[1][z] = np.inf
+            # Last law is bounded in an interval 0.2 wide centered around the estimated noise level
+            bounds[0][-1] = harvey_parameters[-1] - 0.01
+            bounds[1][-1] = harvey_parameters[-1] + 0.01
+            bounds_list.append(tuple(bounds))
 
-            # Estimate amplitude for each Harvey component
-            for harvey_idx, nu in enumerate(self.mnu):
-                min_idx = np.argmax(self.frequency >= nu)
-                if min_idx < self.n_rms:
-                    a[harvey_idx] = np.mean(outer_smooth_power[:self.n_rms])
-                elif (len(outer_smooth_power) - min_idx) < self.n_rms:
-                    a[harvey_idx] = np.mean(outer_smooth_power[-self.n_rms:])
-                else:
-                    a[harvey_idx] = np.mean(outer_smooth_power[min_idx - int(self.n_rms/2):min_idx + int(self.n_rms/2)])
+        reduced_chi2 = []
+        fitted_parameters_list = []
 
-            for n in range(self.num_laws):
-                harvey_parameters[2*n] = a[n]
-                harvey_parameters[2*n + 1] = b[n]
+        for model_idx in range(2 * self.num_laws):
+            # Get the correct number of initial variables as the current Harvey model
+            delta = 2 * (self.num_laws - (model_idx//2 + 1))
+            initial_vars = list(harvey_parameters[:(-delta-1)])
+            initial_vars.append(harvey_parameters[-1])
 
-            if mc_iteration == 0:
-                bin_mask = (bin_frequency > self.envelope_edges[0]) & (bin_frequency < self.envelope_edges[1])
-                self.binned_frequency = bin_frequency[~bin_mask]
-                self.binned_power = bin_power[~bin_mask]
-                self.binned_error = bin_error[~bin_mask]
-                self.a_original = np.copy(a)
-                self.smooth_power = convolve(
-                    self.power,
-                    Box1DKernel(int(np.ceil(self.box_filter / self.resolution)))
-                )
-
+            # First iteration model i.e. [one, __, two, __, three, __]
+            if model_idx % 2 == 0:
                 if self.flags["verbose"]:
-                    print(f"Comparing {2 * self.num_laws} different models:")
-
-                # Get best fit model
-                bounds_list = []
-                for law in range(self.num_laws):
-                    # 2x3, 2x5, 2x7 ...
-                    bounds = np.zeros((2, 2*(law+1) + 1)).tolist()
-                    # Unbounded
-                    for z in range(2*(law+1)):
-                        bounds[0][z] = -np.inf
-                        bounds[1][z] = np.inf
-                    # Last law is bounded in an interval 0.2 wide centered around the estimated noise level
-                    bounds[0][-1] = harvey_parameters[-1] - 0.01
-                    bounds[1][-1] = harvey_parameters[-1] + 0.01
-                    bounds_list.append(tuple(bounds))
-
-                reduced_chi2 = []
-                fitted_parameters_list = []
-                # Names of the Harvey models
-                names = ["one", "one", "two", "two", "three", "three"]
-                model_dictionary = dict(zip(np.arange(2 * self.num_laws), names[:2*self.num_laws]))
-
-                for model_idx in range(2 * self.num_laws):
-                    # First iteration model i.e. [one, __, two, __, three, __]
-                    if model_idx % 2 == 0:
-                        if self.flags["verbose"]:
-                            print(f"{model_idx+1}: {model_dictionary[model_idx]} harvey model w/ white noise free parameter")
-
-                        # Get the correct number of initial variables as the current Harvey model
-                        delta = 2 * (self.num_laws - (model_idx//2 + 1))
-                        initial_vars = list(harvey_parameters[:(-delta-1)])
-                        initial_vars.append(harvey_parameters[-1])
-                        # Try to fit Harvey function
-                        try:
-                            fitted_vars, _cv = curve_fit(
-                                self.functions[model_idx//2 + 1],
-                                self.binned_frequency,
-                                self.binned_power,
-                                p0=initial_vars,
-                                sigma=self.binned_error
-                            )
-                        except RuntimeError:
-                            fitted_parameters_list.append([])
-                            reduced_chi2.append(np.inf)
-                        else:
-                            fitted_parameters_list.append(fitted_vars)
-                            chi, _p = chisquare(f_obs=outer_power, f_exp=harvey(outer_frequency, fitted_vars, total=True))
-                            reduced_chi2.append(chi/(len(outer_frequency) - len(initial_vars)))
-                    # Second iteration model i.e. [__, one, __, two, __, three]
-                    else:
-                        if self.flags["verbose"]:
-                            print(f"{model_idx + 1}: {model_dictionary[model_idx]} harvey model w/ white noise fixed")
-
-                        # Get the correct number of initial variables as the current Harvey model
-                        delta = 2 * (self.num_laws - (model_idx//2 + 1))
-                        initial_vars = list(harvey_parameters[:(-delta-1)])
-                        initial_vars.append(harvey_parameters[-1])
-                        # Try to fit Harvey function with bounds
-                        try:
-                            fitted_vars, _cv = curve_fit(
-                                self.functions[model_idx//2 + 1],
-                                self.binned_frequency,
-                                self.binned_power,
-                                p0=initial_vars,
-                                sigma=self.binned_error,
-                                bounds=bounds_list[model_idx//2]
-                            )
-                        except RuntimeError:
-                            fitted_parameters_list.append([])
-                            reduced_chi2.append(np.inf)
-                        else:
-                            fitted_parameters_list.append(fitted_vars)
-                            chi, _p = chisquare(f_obs=outer_power, f_exp=harvey(outer_frequency, fitted_vars, total=True))
-                            reduced_chi2.append(chi/(len(outer_frequency) - len(initial_vars) + 1))
-
-                # Fitted curve successfully
-                if np.isfinite(min(reduced_chi2)):
-                    model = reduced_chi2.index(min(reduced_chi2))
-                    # [(1, 2) -> 1, (3, 4) -> 2, (5, 6) -> 3]
-                    self.num_laws = ((model)//2) + 1
-                    if self.flags["verbose"]:
-                        print(f"Based on reduced chi-squared statistic: model {model+1}")
-
-                    # Replace parameters with the best model's fitted parameters
-                    self.fitted_harvey_parameters = fitted_parameters_list[model]
-                    best_bounds = bounds_list[self.num_laws - 1]
-                    # Final parameters
-                    harvey_parameters_list = np.zeros((self.num_mc_iter, 2*self.num_laws + 1))
-                    smooth_numax_list = np.zeros(self.num_mc_iter)
-                    smooth_amp_list = np.zeros(self.num_mc_iter)
-                    gaussian_numax_list = np.zeros(self.num_mc_iter)
-                    gaussian_amp_list = np.zeros(self.num_mc_iter)
-                    gaussian_fwhm_list = np.zeros(self.num_mc_iter)
-                    deltanu_list = np.zeros(self.num_mc_iter)
-
-                    # Lower bound is 1.0
-                    sm_par = max(4.0*(self.numax / NUMAX_SUN)**0.2, 1.0)
-                    # Process has succeeded so don't run again
-                    again = False
-
-                # Failed curve fit
-                else:
-                    print("Failed to fit Harvey model...")
-                    again = True
-
-            # Second iteration or later
-            else:
+                    print(f"{model_idx+1}: {model_dictionary[model_idx]} harvey model w/ white noise free parameter")
                 # Try to fit Harvey function
                 try:
-                    harvey_parameters, _cv = curve_fit(
-                        self.functions[self.num_laws],
+                    fitted_vars, _cv = curve_fit(
+                        self.functions[model_idx//2 + 1],
                         self.binned_frequency,
                         self.binned_power,
-                        p0=harvey_parameters,
-                        sigma=self.binned_error,
-                        bounds=best_bounds
+                        p0=initial_vars,
+                        sigma=self.binned_error
                     )
-                # Failed to fit Harvey function
-                except RuntimeError as e:
-                    print("Failed to fit Harvey function...")
-                    again = True
-                except ValueError as e:
-                    print(f"Updating bounds... {e}")
-                    again = True
-                    best_bounds[0][-1] -= 0.01
-                    best_bounds[1][-1] += 0.01
-                # Successfully fit Harvey function
+                except RuntimeError:
+                    fitted_parameters_list.append([])
+                    reduced_chi2.append(np.inf)
                 else:
-                    again = False
+                    fitted_parameters_list.append(fitted_vars)
+                    chi, _p = chisquare(
+                        f_obs=random_power[~self.mask],
+                        f_exp=harvey(
+                            self.frequency[~self.mask],
+                            fitted_vars,
+                            total=True
+                        )
+                    )
+                    reduced_chi2.append(chi/(len(self.frequency[~self.mask]) - len(initial_vars)))
+            # Second iteration model i.e. [__, one, __, two, __, three]
+            else:
+                if self.flags["verbose"]:
+                    print(f"{model_idx + 1}: {model_dictionary[model_idx]} harvey model w/ white noise fixed")
+                # Try to fit Harvey function with bounds
+                try:
+                    fitted_vars, _cv = curve_fit(
+                        self.functions[model_idx//2 + 1],
+                        self.binned_frequency,
+                        self.binned_power,
+                        p0=initial_vars,
+                        sigma=self.binned_error,
+                        bounds=bounds_list[model_idx//2]
+                    )
+                except RuntimeError:
+                    fitted_parameters_list.append([])
+                    reduced_chi2.append(np.inf)
+                else:
+                    fitted_parameters_list.append(fitted_vars)
+                    chi, _p = chisquare(
+                        f_obs=random_power[~self.mask],
+                        f_exp=harvey(
+                            self.frequency[~self.mask],
+                            fitted_vars,
+                            total=True
+                        )
+                    )
+                    reduced_chi2.append(chi/(len(self.frequency[~self.mask]) - len(initial_vars) + 1))
 
-            # Retry if curve fitting failed
-            if again:
-                print("Retrying...")
-                continue
+        # Fitted curve successfully
+        if np.isfinite(min(reduced_chi2)):
+            model = reduced_chi2.index(min(reduced_chi2))
+            # [(1, 2) -> 1, (3, 4) -> 2, (5, 6) -> 3]
+            self.num_laws = ((model)//2) + 1
+            if self.flags["verbose"]:
+                print(f"Based on reduced chi-squared statistic: model {model+1}")
+
+            # Replace parameters with the best model's fitted parameters
+            self.fitted_harvey_parameters = fitted_parameters_list[model]
+            best_bounds = bounds_list[self.num_laws - 1]
+            # Final parameters
+            harvey_parameters_list = np.zeros((self.num_mc_iter, 2*self.num_laws + 1))
+            smooth_numax_list = np.zeros(self.num_mc_iter)
+            smooth_amp_list = np.zeros(self.num_mc_iter)
+            gaussian_numax_list = np.zeros(self.num_mc_iter)
+            gaussian_amp_list = np.zeros(self.num_mc_iter)
+            gaussian_fwhm_list = np.zeros(self.num_mc_iter)
+            deltanu_list = np.zeros(self.num_mc_iter)
+
+            # Lower bound is 1.0
+            sm_par = max(4.0*(self.numax / NUMAX_SUN)**0.2, 1.0)
+            # Process has succeeded so don't run again
+
+        # Failed curve fit
+        else:
+            print(f"Target: {self.target} has failed to fit Harvey model...")
+            sys.exit()
+
+        pssm, region_frequency, region_power, background_model, numax_idx = self.estimate_smooth_numax(
+            sm_par,
+            random_power,
+            harvey_parameters,
+            smooth_numax_list,
+            smooth_amp_list,
+            0
+        )
+
+        self.pssm = pssm
+        self.region_frequency = region_frequency
+        self.region_power = region_power
+
+        numax_gaussian_parameters = _estimate_gaussian_numax(
+            region_frequency,
+            region_power,
+            numax_idx,
+            gaussian_numax_list,
+            gaussian_amp_list,
+            gaussian_fwhm_list,
+            0
+        )
+
+        self.numax_gaussian_parameters = numax_gaussian_parameters
+
+        dnu_result = self.estimate_dnu(
+            region_frequency,
+            random_power,
+            background_model,
+            numax_gaussian_parameters,
+            deltanu_list,
+            0
+        )
+
+        psd, lag, auto, best_lag, best_auto, lag_peaks, auto_peaks, zoom_lag, zoom_auto, dnu_gaussian_parameters = dnu_result
+
+        self.psd = psd
+        self.lag = lag
+        self.auto = auto
+        self.best_lag = best_lag
+        self.best_auto = best_auto
+        self.lag_peaks = lag_peaks
+        self.auto_peaks = auto_peaks
+        self.zoom_lag = zoom_lag
+        self.zoom_auto = zoom_auto
+        self.dnu_gaussian_parameters = dnu_gaussian_parameters
+        self.plot_fitbg()
+
+        # Monte-Carlo sampling
+        for mc_iteration in tqdm(range(1, self.num_mc_iter)):
+            # Randomize power spectrum to get uncertainty on measured values
+            random_power = (np.random.chisquare(2, len(self.frequency)) * self.power)/2.0
+            bin_frequency, bin_power, bin_error = mean_smooth_ind(
+                self.frequency,
+                random_power,
+                self.ind_width
+            )
+
+            if self.num_laws != self.num_laws_original:
+                self.mnu = self.mnu_original[:self.num_laws]
+                b = b[:self.num_laws]
+
+            harvey_parameters, a = self.estimate_harvey_parameters(random_power, b)
+
+            # Try to fit Harvey function
+            try:
+                harvey_parameters, _cv = curve_fit(
+                    self.functions[self.num_laws],
+                    self.binned_frequency,
+                    self.binned_power,
+                    p0=harvey_parameters,
+                    sigma=self.binned_error,
+                    bounds=best_bounds
+                )
+            # Failed to fit Harvey function
+            except RuntimeError as e:
+                print(f"Target: {self.target} has failed to fit Harvey model at iteration {mc_iteration}...")
+                sys.exit()
 
             harvey_parameters_list[mc_iteration, :] = harvey_parameters
 
-            fwhm = sm_par * self.dnu / self.resolution
-            # Standard deviation
-            sig = fwhm/np.sqrt(8 * np.log(2))
-            gauss_kernel = Gaussian1DKernel(int(sig))
-            # Smoothed power spectrum before background correction
-            pssm = convolve_fft(random_power, gauss_kernel)
-
-            # Model of stellar background
-            background_model = harvey(self.frequency, harvey_parameters, total=True)
-
-            # Correct for edge effects and residual slope in Gaussian fit
-            region_frequency = np.copy(self.frequency[self.mask])
-
-            # Correction
-            # The difference between the first point of the power envelope and the last point of the power envelope
-            delta_y = pssm[self.mask][-1] - pssm[self.mask][0]
-            # The width of the power envelope
-            delta_x = max(region_frequency) - min(region_frequency)
-            # The general slope of the power envelope
-            slope = delta_y / delta_x
-            # y-intercept
-            y_intercept = (-1.0 * slope * min(region_frequency)) + pssm[self.mask][0]
-            corrected = np.array([slope * region_frequency[z] + y_intercept for z in range(len(region_frequency))])
-            corrected_pssm = [
-                max(pssm[self.mask][z] - corrected[z], 0) + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
-            ]
-
-            plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
-            ss = np.argsort(plot_x)
-            plot_x = plot_x[ss]
-            pssm = np.array(corrected_pssm + list(background_model[~self.mask]))
-            pssm = pssm[ss]
-
-            # Subtract stellar background
-            pssm_bgcorr = pssm - background_model
-
-            region_power = pssm_bgcorr[self.mask]
-            # Index of maximum power i.e. numax estimation
-            idx = self.return_max(region_power, index=True)
-            smooth_numax_list[mc_iteration] = region_frequency[idx]
-            smooth_amp_list[mc_iteration] = region_power[idx]
-
-            if list(region_frequency) != []:
-                # numax_gaussian_bounds = self.gaussian_bounds(region_frequency, region_power)
-                initial_vars = [
-                    0.0,
-                    max(region_power),
-                    region_frequency[idx],
-                    (max(region_frequency) - min(region_frequency))/8.0/np.sqrt(8.0*np.log(2.0))
-                ]
-                numax_gaussian_parameters, _cv = curve_fit(
-                    gaussian,
-                    region_frequency,
-                    region_power,
-                    p0=initial_vars,
-                )
-                offset, amplitude, center, width = numax_gaussian_parameters
-                gaussian_numax_list[mc_iteration] = center
-                gaussian_amp_list[mc_iteration] = amplitude
-                gaussian_fwhm_list[mc_iteration] = width
-
-            # Background correction
-            self.bg_corr = random_power / background_model
-
-            # Optional smoothing of PS to remove fine structure TODO: This doesn't seem to be initialised anywhere
-            if False and self.smooth_ps is not None:
-                boxkernel = Box1DKernel(int(np.ceil(self.smooth_ps / self.resolution)))
-                bg_corr_smooth = convolve(self.bg_corr, boxkernel)
-            else:
-                bg_corr_smooth = np.array(self.bg_corr)
-
-            self.width = WIDTH_SUN * (width / NUMAX_SUN)
-            self.numax = center
-            self.sm_par = 4.0 * (self.numax / NUMAX_SUN)**0.2
-            self.dnu = 0.22 * (self.numax**0.797)
-            self.num_dnus = self.width / self.dnu
-
-            # Frequencies in the power envelope
-            psd = bg_corr_smooth[self.mask]
-            lag, auto = self.corr(region_frequency, psd)
-            lag_peaks, auto_peaks = self.max_elements(lag, auto)
-
-            # Pick the peak closest to the modelled numax
-            idx = self.return_max(lag_peaks, index=True, dnu=True)
-            best_lag = lag_peaks[idx]
-            best_auto = auto_peaks[idx]
-            lag_peaks[idx] = np.nan
-            auto_peaks[idx] = np.nan
-
-            dnu_gaussian_bounds = self.gaussian_bounds(lag, auto, best_x=best_lag, sigma=10**(-2.0))
-            initial_vars = [
-                np.mean(auto),
-                best_auto,
-                best_lag,
-                0.01 * 2.0 * best_lag
-            ]
-            # Fitting Gaussian to ACF to find deltanu
-            dnu_gaussian_parameters, _cv = curve_fit(
-                gaussian,
-                lag,
-                auto,
-                p0=initial_vars,
-                bounds=dnu_gaussian_bounds
+            pssm, region_frequency, region_power, background_model, numax_idx = self.estimate_smooth_numax(
+                sm_par,
+                random_power,
+                harvey_parameters,
+                smooth_numax_list,
+                smooth_amp_list,
+                mc_iteration
             )
 
-            offset, amplitude, center, width = dnu_gaussian_parameters
+            numax_gaussian_parameters = _estimate_gaussian_numax(
+                region_frequency,
+                region_power,
+                numax_idx,
+                gaussian_numax_list,
+                gaussian_amp_list,
+                gaussian_fwhm_list,
+                mc_iteration
+            )
 
-            zoom_mask = (lag >= best_lag - 3.0*width) & (lag <= best_lag + 3.0*width)
-            zoom_lag = lag[zoom_mask]
-            zoom_auto = auto[zoom_mask]
-            dnu_fit = gaussian(zoom_lag, offset, amplitude, center, width)
-            idx = self.return_max(dnu_fit, index=True)
-
-            # Force deltanu measurement to be the initial guess
-            if self.flags["force"]:
-                self.dnu = self.guess
-            # Use deltanu found using ACF
-            else:
-                self.dnu = zoom_lag[idx]
-
-            self.get_ridges(mc_iteration)
-            deltanu_list[mc_iteration] = self.dnu
-
-            if mc_iteration == 0 and not again:
-                self.pssm = pssm
-                self.region_frequency = region_frequency
-                self.region_power = region_power
-                self.numax_gaussian_parameters = numax_gaussian_parameters
-                self.psd = psd
-                self.lag = lag
-                self.auto = auto
-                self.best_lag = best_lag
-                self.best_auto = best_auto
-                self.lag_peaks = lag_peaks
-                self.auto_peaks = auto_peaks
-                self.zoom_lag = zoom_lag
-                self.zoom_auto = zoom_auto
-                self.dnu_gaussian_parameters = dnu_gaussian_parameters
-                self.plot_fitbg()
-
-            mc_iteration += 1
+            _dnu_result = self.estimate_dnu(
+                region_frequency,
+                random_power,
+                background_model,
+                numax_gaussian_parameters,
+                deltanu_list,
+                mc_iteration
+            )
 
         if self.num_mc_iter > 1:
             if self.flags["verbose"]:
@@ -763,42 +908,39 @@ class FitBackground:
             )
 
         else:
-            if again:
-                results.append([self.target, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
-            else:
-                if self.flags["verbose"]:
-                    print(f"numax (smoothed): {smooth_numax_list[0]:.2f} muHz")
-                    print(f"maxamp (smoothed): {smooth_amp_list[0]:.2f} ppm^2/muHz")
-                    print(f"numax (gaussian): {gaussian_numax_list[0]:.2f} muHz")
-                    print(f"maxamp (gaussian): {gaussian_amp_list[0]:.2f} ppm^2/muHz")
-                    print(f"fwhm (gaussian): {gaussian_fwhm_list[0]:.2f} muHz")
-                    print(f"dnu: {deltanu_list[0]:.2f} muHz")
-                    print("-------------------------------------------------\n")
+            if self.flags["verbose"]:
+                print(f"numax (smoothed): {smooth_numax_list[0]:.2f} muHz")
+                print(f"maxamp (smoothed): {smooth_amp_list[0]:.2f} ppm^2/muHz")
+                print(f"numax (gaussian): {gaussian_numax_list[0]:.2f} muHz")
+                print(f"maxamp (gaussian): {gaussian_amp_list[0]:.2f} ppm^2/muHz")
+                print(f"fwhm (gaussian): {gaussian_fwhm_list[0]:.2f} muHz")
+                print(f"dnu: {deltanu_list[0]:.2f} muHz")
+                print("-------------------------------------------------\n")
 
-                results.append(
-                    [
-                        self.target,
-                        smooth_numax_list[0],
-                        0.0,
-                        smooth_amp_list[0],
-                        0.0,
-                        gaussian_numax_list[0],
-                        0.0,
-                        gaussian_amp_list[0],
-                        0.0,
-                        gaussian_fwhm_list[0],
-                        0.0,
-                        deltanu_list[0],
-                        0.0
-                    ]
-                )
+            results.append(
+                [
+                    self.target,
+                    smooth_numax_list[0],
+                    0.0,
+                    smooth_amp_list[0],
+                    0.0,
+                    gaussian_numax_list[0],
+                    0.0,
+                    gaussian_amp_list[0],
+                    0.0,
+                    gaussian_fwhm_list[0],
+                    0.0,
+                    deltanu_list[0],
+                    0.0
+                ]
+            )
 
         self.write_bgfit(results[0])
 
     def plot_fitbg(self) -> None:
-        """Plots result of fitbg routine."""
+        """Plots result of fit background routine."""
 
-        # Cached variables
+        # Masks
         left_envelope_mask = self.frequency < self.envelope_edges[0]
         right_envelope_mask = self.frequency > self.envelope_edges[1]
 
@@ -928,7 +1070,7 @@ class FitBackground:
         # Smoothed power excess w/ Gaussian
         ax4 = fig.add_subplot(3, 3, 4)
         ax4.plot(self.region_frequency, self.region_power, "w-", zorder=0)
-        idx = self.return_max(self.region_power, index=True)
+        idx = _return_max(self.numax, self.region_power, index=True)
         ax4.plot([self.region_frequency[idx]], [self.region_power[idx]], color="red", marker="s", markersize=7.5, zorder=0)
         ax4.axvline([self.region_frequency[idx]], color="white", linestyle="--", linewidth=1.5, zorder=0)
         gaus = gaussian(self.region_frequency, *self.numax_gaussian_parameters)
@@ -959,7 +1101,7 @@ class FitBackground:
         ax4.set_ylim([plot_min - 0.1*plot_range, plot_max + 0.1*plot_range])
 
         # Background-corrected PS with n highest peaks
-        peaks_f, peaks_p = self.max_elements(self.region_frequency, self.psd)
+        peaks_f, peaks_p = _max_elements(self.region_frequency, self.psd, self.n_peaks)
         ax5 = fig.add_subplot(3, 3, 5)
         ax5.plot(self.region_frequency, self.psd, "w-", zorder=0, linewidth=1.0)
         ax5.scatter(peaks_f, peaks_p, s=25.0, edgecolor="r", marker="s", facecolor="none", linewidths=1.0)
@@ -988,7 +1130,7 @@ class FitBackground:
 
         # dnu fit
         fit = gaussian(self.zoom_lag, *self.dnu_gaussian_parameters)
-        idx = self.return_max(fit, index=True)
+        idx = _return_max(self.numax, fit, index=True)
         plot_lower = min(self.zoom_auto)
         if min(fit) < plot_lower:
             plot_lower = min(fit)
@@ -1047,16 +1189,16 @@ class FitBackground:
         )
 
         plt.tight_layout()
-        # Save plot
+        # Save plots
         if self.flags["save"]:
+            print("Saving fitbg plot...")
             plt.savefig(f"{self.path}{self.target}_fitbg.png", dpi=300)
         if self.flags["show_plots"]:
             plt.show()
         plt.close()
 
     def plot_mc(self, mc_data: list) -> None:
-        """
-        Plots Markov-Chain Monte-Carlo simulation.
+        """Plots Markov-Chain Monte-Carlo simulation.
 
         Parameters
         ----------
@@ -1089,132 +1231,15 @@ class FitBackground:
             plt.show()
         plt.close()
 
-    def return_max(self, array, index=False, dnu=False):
-        """Returns the min/max of the given array or its index.
+    def get_ridges(self, mc_iteration: int, start: float = 0.0) -> None:
+        """Calculate echelle properties.
 
         Parameters
         ----------
-        array : np.ndarray
-            array
-        index : bool
-            will return the index if true
-        dnu : bool
-            will find the minimum of the |array - estimated_dnu|
-
-        Returns
-        result : int | float
-            either the min/max value or the index of the min/max value
-        """
-        if dnu:
-            exp_dnu = 0.22*(self.numax**0.797)
-            lst = list(np.absolute(np.copy(array)-exp_dnu))
-            idx = lst.index(min(lst))
-        else:
-            lst = list(array)
-            idx = lst.index(max(lst))
-        if index:
-            return idx
-        else:
-            return lst[idx]
-
-    def corr(self, _frequency: np.ndarray, power: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Calculates autocorrelation.
-
-        Parameters
-        ----------
-        frequency : np.ndarray
-            power spectrum frequency
-        power : np.ndarray
-            power spectrum power
-
-        Returns
-        -------
-        lag : np.ndarray
-            frequency lag
-        auto : np.ndarray
-            autocorrelation
-        """
-
-        lag = np.arange(0.0, len(power)) * self.resolution
-        auto = np.real(np.fft.fft(np.fft.ifft(power)*np.conj(np.fft.ifft(power))))
-
-        lower_limit = self.dnu / 4.0
-        upper_limit = 2.0*self.dnu + self.dnu/4.0
-
-        mask = np.ma.getmask(np.ma.masked_inside(lag, lower_limit, upper_limit))
-        lag = lag[mask]
-        auto = auto[mask]
-        auto -= min(auto)
-        auto /= max(auto)
-
-        return lag, auto
-
-    def max_elements(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns the first n peaks of y and its corresponding x co-ordinate.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            x data
-        y : np.ndarray
-            y data
-
-        Returns
-        -------
-        peaks_x : np.ndarray
-            the x co-ordinates of the first n peaks of y
-        peaks_y : np.ndarray
-            the y co-ordinates of the first n peaks of y
-        """
-
-        s = np.argsort(y)
-        peaks_y = y[s][-int(self.n_peaks):][::-1]
-        peaks_x = x[s][-int(self.n_peaks):][::-1]
-
-        return peaks_x, peaks_y
-
-    def gaussian_bounds(self, x, y, best_x=None, sigma=None) -> Tuple:
-        """Generates parameter bounds on Gaussian functions.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            x data
-        y : np.ndarray
-            y data
-        best_x : float
+        mc_iteration : int
+            the current Monte-Carlo iteration
+        start : float
             TODO: Don't know
-        sigma : float
-            TODO: Don't know
-
-        Returns
-        -------
-        result : tuple
-            Gaussian bounds
-        """
-
-        if sigma is None:
-            sigma = (max(x) - min(x))/8.0/np.sqrt(8.0 * np.log(2.0))
-
-        b = np.zeros((2, 4)).tolist()
-        b[1][0] = np.inf
-        # TODO: This seems to imply that int(np.max()) will be None which would make the first assignment invalid
-        b[1][1] = 2.0*np.max(y)
-        if not int(np.max(y)):
-            b[1][1] = np.inf
-        if best_x is not None:
-            b[0][2] = 0.999 * best_x
-            b[1][2] = 1.001 * best_x
-        else:
-            b[0][2] = np.min(x)
-            b[1][2] = np.max(x)
-        b[0][3] = sigma
-        b[1][3] = np.max(x) - np.min(x)
-        return tuple(b)
-
-    def get_ridges(self, mc_iteration: int, start: float = 0.0):
-        """
-        TODO: Not sure what this does exactly
         """
 
         if mc_iteration == 0:
@@ -1259,7 +1284,13 @@ class FitBackground:
             self.collapsed_power = yax
 
     def get_best_dnu(self) -> float:
-        """Estimates deltanu."""
+        """Estimates deltanu.
+
+        Returns
+        -------
+        dnu : float
+            estimated deltanu
+        """
 
         # Create range around current deltanu estimate
         dnus = np.arange(0.95*self.dnu, 1.05*self.dnu, 0.01)
@@ -1282,7 +1313,7 @@ class FitBackground:
 
             difference[dnu_idx] = np.max(yax) - np.mean(yax)
 
-        idx = self.return_max(difference, index=True)
+        idx = _return_max(self.numax, difference, index=True)
         return dnus[idx]
 
     def calculate_echelle(self, nox=20, startx=0.0):
@@ -1341,9 +1372,13 @@ class FitBackground:
         else:
             return None
 
-    def write_bgfit(self, results):
-        """
-        Writes result of fitbg to output file.
+    def write_bgfit(self, results: list) -> None:
+        """Writes result of fitbg to output file.
+
+        Parameters
+        ----------
+        results : list
+            the results of the fit background routine
         """
 
         variables = [
@@ -1404,3 +1439,202 @@ def _get_white_noise(frequency: np.ndarray, random_power: np.ndarray, nyquist: f
         mask = (frequency > (0.9 * max(frequency))) & (frequency < max(frequency))
         noise = np.mean(random_power[mask])
     return noise
+
+
+def _return_max(numax: float, array: np.ndarray, index: bool = False, dnu: bool = False) -> float:
+    """Returns the min/max of the given array or its index.
+
+    Parameters
+    ----------
+    numax : float
+        estimated numax
+    array : np.ndarray
+        array
+    index : bool
+        will return the index if true
+    dnu : bool
+        will find the minimum of the |array - estimated_dnu|
+
+    Returns
+    -------
+    result : int | float
+        either the min/max value or the index of the min/max value
+    """
+
+    if dnu:
+        exp_dnu = estimate_delta_nu_from_numax(numax)
+        lst = list(np.absolute(np.copy(array)-exp_dnu))
+        idx = lst.index(min(lst))
+    else:
+        lst = list(array)
+        idx = lst.index(max(lst))
+    if index:
+        return idx
+    else:
+        return lst[idx]
+
+
+def _max_elements(x: np.ndarray, y: np.ndarray, num_peaks: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Returns the first n peaks of y and its corresponding x co-ordinate.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        x data
+    y : np.ndarray
+        y data
+    num_peaks : int
+        the number of peaks
+
+    Returns
+    -------
+    peaks_x : np.ndarray
+        the x co-ordinates of the first n peaks of y
+    peaks_y : np.ndarray
+        the y co-ordinates of the first n peaks of y
+    """
+
+    s = np.argsort(y)
+    peaks_y = y[s][-int(num_peaks):][::-1]
+    peaks_x = x[s][-int(num_peaks):][::-1]
+
+    return peaks_x, peaks_y
+
+
+def _gaussian_bounds(x: np.ndarray, y: np.ndarray, best_x: float = None, sigma: float = None) -> Tuple:
+    """Generates parameter bounds on Gaussian functions.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        x data
+    y : np.ndarray
+        y data
+    best_x : float
+        TODO: Don't know
+    sigma : float
+        TODO: Don't know
+
+    Returns
+    -------
+    result : tuple
+        Gaussian bounds
+    """
+
+    if sigma is None:
+        sigma = (max(x) - min(x))/8.0/np.sqrt(8.0 * np.log(2.0))
+
+    b = np.zeros((2, 4)).tolist()
+    b[1][0] = np.inf
+    # TODO: This seems to imply that int(np.max()) will be None which would make the first assignment invalid
+    b[1][1] = 2.0*np.max(y)
+    if not int(np.max(y)):
+        b[1][1] = np.inf
+    if best_x is not None:
+        b[0][2] = 0.999 * best_x
+        b[1][2] = 1.001 * best_x
+    else:
+        b[0][2] = np.min(x)
+        b[1][2] = np.max(x)
+    b[0][3] = sigma
+    b[1][3] = np.max(x) - np.min(x)
+    return tuple(b)
+
+
+def _corr(_frequency: np.ndarray, power: np.ndarray, dnu: float, resolution: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Calculates autocorrelation.
+
+    Parameters
+    ----------
+    frequency : np.ndarray
+        power spectrum frequency
+    power : np.ndarray
+        power spectrum power
+    dnu : float
+        estimated deltanu
+    resolution : float
+        frequency resolution of the power spectrum
+
+    Returns
+    -------
+    lag : np.ndarray
+        frequency lag
+    auto : np.ndarray
+        autocorrelation
+    """
+
+    lag = np.arange(0.0, len(power)) * resolution
+    auto = np.real(np.fft.fft(np.fft.ifft(power)*np.conj(np.fft.ifft(power))))
+
+    lower_limit = dnu / 4.0
+    upper_limit = 2.0*dnu + dnu/4.0
+
+    mask = np.ma.getmask(np.ma.masked_inside(lag, lower_limit, upper_limit))
+    lag = lag[mask]
+    auto = auto[mask]
+    auto -= min(auto)
+    auto /= max(auto)
+
+    return lag, auto
+
+
+def _estimate_gaussian_numax(
+        region_frequency: np.ndarray,
+        region_power: np.ndarray,
+        numax_idx: int,
+        gaussian_numax_list: np.ndarray,
+        gaussian_amp_list: np.ndarray,
+        gaussian_fwhm_list: np.ndarray,
+        mc_iteration: int
+) -> np.ndarray:
+    """Attempts to fit a Gaussian to the smoothed power spectrum to measure numax.
+
+    Parameters
+    ----------
+    region_frequency : np.ndarray
+        frequencies inside the power envelope
+    region_power : np.ndarray
+        the background corrected smooth power spectrum of the power envelope
+    numax_idx : int
+        the index of the numax frequency in `region_frequency`
+    gaussian_numax_list : np.ndarray
+        list containing numax measurements from Gaussian fitting
+    gaussian_amp_list : np.ndarray
+        list containing amplitude measurements from Gaussian fitting
+    gaussian_fwhm_list : np.ndarray
+        list containing FWHM measurements from Gaussian fitting
+    mc_iteration : int
+        the current Monte-Carlo iteration
+
+    Returns
+    -------
+    numax_gaussian_parameters : np.ndarray
+        the parameters of the fitted Gaussian
+    """
+
+    if len(region_frequency) > 0:
+        # numax_gaussian_bounds = _gaussian_bounds(region_frequency, region_power)
+        initial_vars = [
+            0.0,
+            max(region_power),
+            region_frequency[numax_idx],
+            (max(region_frequency) - min(region_frequency))/8.0/np.sqrt(8.0*np.log(2.0))
+        ]
+        try:
+            numax_gaussian_parameters, _cv = curve_fit(
+                gaussian,
+                region_frequency,
+                region_power,
+                p0=initial_vars,
+            )
+        except RuntimeError as e:
+            print(e)
+            print(f"initial vars = {initial_vars}")
+            sys.exit()
+        offset, amplitude, center, width = numax_gaussian_parameters
+        gaussian_numax_list[mc_iteration] = center
+        gaussian_amp_list[mc_iteration] = amplitude
+        gaussian_fwhm_list[mc_iteration] = width
+
+        return numax_gaussian_parameters
+    return None

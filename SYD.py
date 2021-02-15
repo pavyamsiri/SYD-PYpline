@@ -8,28 +8,19 @@ import glob
 import multiprocessing as mp
 import os
 import subprocess
+import sys
+import time
 from typing import Iterable, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-# from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
-#                                  convolve_fft)
-# from astropy.stats import mad_std
-# from matplotlib.colors import LogNorm, Normalize, PowerNorm
-# from matplotlib.ticker import (FormatStrFormatter, MaxNLocator,
-#                                MultipleLocator, ScalarFormatter)
-# from scipy import interpolate
-# from scipy.interpolate import InterpolatedUnivariateSpline
-# from scipy.optimize import curve_fit
-# from scipy.stats import chisquare
 
-from functions import *
 from constants import *
-from target_data import TargetData
 from find_excess import FindExcess
 from fit_background import FitBackground
-
+from functions import *
+from target_data import TargetData
 
 # Defaults
 DEFAULT_STAR_INFO = "Files/star_info.csv"
@@ -83,8 +74,6 @@ def main(args: list) -> None:
 
     # Concatenate data together
     subprocess.call(["python", "scrape_output.py"], shell=True)
-
-    return
 
 
 # Argument parsing
@@ -386,6 +375,8 @@ class PowerSpectrum:
             list of targets to process
         """
 
+        completion_times = []
+
         for target in targets:
             target_data = self.load_data(target)
             if target_data is not None:
@@ -405,11 +396,12 @@ class PowerSpectrum:
                     print("Fitting background...")
                     # Load target data, numax, snr and dnu into the find excess routine
                     self.fitbg.update_target(target_data, numax, snr, dnu)
+                    start = time.time()
                     completed = self.fitbg.fit_background()
-                    # try:
-                    #     self.fitbg.fit_background()
-                    # except Exception as e:
-                    #     print(f"While processing target {target} ran into an exception. {e}")
+                    elapsed = time.time() - start
+                    completion_times.append(elapsed)
+        avg_time = np.mean(np.array(completion_times))
+        print(f"Average completion time is {avg_time//60} minutes and {avg_time%60:.2f} seconds.")
 
 ##########################################################################################
 #                                                                                        #
@@ -629,9 +621,7 @@ class PowerSpectrum:
 
 
 if __name__ == "__main__":
-    import sys
-    import time
     start_time = time.time()
     main(sys.argv[1:])
     elapsed = time.time() - start_time
-    print(f"Completed in {elapsed//60} minutes and {elapsed%60} seconds!")
+    print(f"Completed in {elapsed//60} minutes and {elapsed%60:.2f} seconds!")
