@@ -376,6 +376,7 @@ class PowerSpectrum:
         """
 
         completion_times = []
+        failed_targets = []
 
         for target in targets:
             target_data = self.load_data(target)
@@ -397,11 +398,19 @@ class PowerSpectrum:
                     # Load target data, numax, snr and dnu into the find excess routine
                     self.fitbg.update_target(target_data, numax, snr, dnu)
                     start = time.time()
-                    completed = self.fitbg.fit_background()
+                    try:
+                        completed = self.fitbg.fit_background()
+                    except Exception as e:
+                        print(f"Failed to fit background for {target}. Moving on...\n")
+                        failed_targets.append(target)
+                        continue
                     elapsed = time.time() - start
                     completion_times.append(elapsed)
+                print()
         avg_time = np.mean(np.array(completion_times))
         print(f"Average completion time is {avg_time//60} minutes and {avg_time%60:.2f} seconds.")
+        print("Failed targets are")
+        print(*failed_targets, sep="\n")
 
 ##########################################################################################
 #                                                                                        #
@@ -624,4 +633,4 @@ if __name__ == "__main__":
     start_time = time.time()
     main(sys.argv[1:])
     elapsed = time.time() - start_time
-    print(f"Completed in {elapsed//60} minutes and {elapsed%60:.2f} seconds!")
+    print(f"Completed in {elapsed//3600} hours, {elapsed//60} minutes and {elapsed%60:.2f} seconds!")

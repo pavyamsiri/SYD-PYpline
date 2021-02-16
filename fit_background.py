@@ -46,7 +46,7 @@ class FitBackground:
             save: bool = True,
             verbose: bool = False,
             show_plots: bool = False,
-            num_mc_iter: int = 50,
+            num_mc_iter: int = 200,
             lower: float = 10.0,
             upper: float = None,
             box_filter: float = 1.0,
@@ -450,25 +450,25 @@ class FitBackground:
         # Correct for edge effects and residual slope in Gaussian fit
         region_frequency = np.copy(self.frequency[self.mask])
 
-        # Correction
-        # The difference between the first point of the power envelope and the last point of the power envelope
-        delta_y = pssm[self.mask][-1] - pssm[self.mask][0]
-        # The width of the power envelope
-        delta_x = max(region_frequency) - min(region_frequency)
-        # The general slope of the power envelope
-        slope = delta_y / delta_x
-        # y-intercept
-        y_intercept = (-1.0 * slope * min(region_frequency)) + pssm[self.mask][0]
-        corrected = np.array([slope * region_frequency[z] + y_intercept for z in range(len(region_frequency))])
-        corrected_pssm = [
-            max(pssm[self.mask][z] - corrected[z], 0) + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
-        ]
+        # # Correction: Not sure if needed
+        # # The difference between the first point of the power envelope and the last point of the power envelope
+        # delta_y = pssm[self.mask][-1] - pssm[self.mask][0]
+        # # The width of the power envelope
+        # delta_x = max(region_frequency) - min(region_frequency)
+        # # The general slope of the power envelope
+        # slope = delta_y / delta_x
+        # # y-intercept
+        # y_intercept = (-1.0 * slope * min(region_frequency)) + pssm[self.mask][0]
+        # corrected = np.array([slope * region_frequency[z] + y_intercept for z in range(len(region_frequency))])
+        # corrected_pssm = [
+        #     max(pssm[self.mask][z] - corrected[z], 0) + background_model[self.mask][z] for z in range(len(pssm[self.mask]))
+        # ]
 
-        plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
-        ss = np.argsort(plot_x)
-        plot_x = plot_x[ss]
-        pssm = np.array(corrected_pssm + list(background_model[~self.mask]))
-        pssm = pssm[ss]
+        # plot_x = np.array(list(self.frequency[self.mask]) + list(self.frequency[~self.mask]))
+        # ss = np.argsort(plot_x)
+        # plot_x = plot_x[ss]
+        # pssm = np.array(corrected_pssm + list(background_model[~self.mask]))
+        # pssm = pssm[ss]
 
         # Subtract stellar background
         pssm_bgcorr = pssm - background_model
@@ -756,8 +756,7 @@ class FitBackground:
 
         # Failed curve fit
         else:
-            print(f"Target: {self.target} has failed to fit Harvey model...")
-            sys.exit()
+            raise ValueError(f"Target: {self.target} has failed to fit Harvey model...")
 
         pssm, region_frequency, region_power, background_model, numax_idx = self.estimate_smooth_numax(
             sm_par,
@@ -835,8 +834,7 @@ class FitBackground:
                 )
             # Failed to fit Harvey function
             except RuntimeError as e:
-                print(f"Target: {self.target} has failed to fit Harvey model at iteration {mc_iteration}...")
-                sys.exit()
+                raise ValueError(f"Target: {self.target} has failed to fit Harvey model at iteration {mc_iteration}...")
 
             harvey_parameters_list[mc_iteration, :] = harvey_parameters
 
@@ -1628,9 +1626,7 @@ def _estimate_gaussian_numax(
                 p0=initial_vars,
             )
         except RuntimeError as e:
-            print(e)
-            print(f"initial vars = {initial_vars}")
-            sys.exit()
+            raise ValueError("Failed to fit Gaussian to find numax")
         offset, amplitude, center, width = numax_gaussian_parameters
         gaussian_numax_list[mc_iteration] = center
         gaussian_amp_list[mc_iteration] = amplitude
