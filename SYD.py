@@ -293,7 +293,7 @@ class PowerSpectrum:
         self.targets = {}
         self.data_folder = data if os.path.isdir(data) else DEFAULT_DATA
         self.get_info(todo, star_info)
-        self.set_plot_params()
+        set_plot_params()
 
     def get_info(self, todo, star_info):
         """Loads target list, constants, routine parameters and star info.
@@ -339,33 +339,6 @@ class PowerSpectrum:
         # Load star info
         self.get_star_info(star_info)
 
-    def set_plot_params(self) -> None:
-        """Sets plot styling and parameters."""
-
-        plt.style.use("dark_background")
-        plt.rcParams.update(
-            {
-                "agg.path.chunksize": 10000,
-                "mathtext.fontset": "stix",
-                "figure.autolayout": True,
-                "lines.linewidth": 1,
-                "axes.titlesize": 18.0,
-                "axes.labelsize": 16.0,
-                "axes.linewidth": 1.25,
-                "axes.formatter.useoffset": False,
-                "xtick.major.size": 10.0,
-                "xtick.minor.size": 5.0,
-                "xtick.major.width": 1.25,
-                "xtick.minor.width": 1.25,
-                "xtick.direction": "inout",
-                "ytick.major.size": 10.0,
-                "ytick.minor.size": 5.0,
-                "ytick.major.width": 1.25,
-                "ytick.minor.width": 1.25,
-                "ytick.direction": "inout",
-            }
-        )
-
     def assign_tasks(self, targets: list) -> None:
         """Processes targets in target list.
 
@@ -384,8 +357,8 @@ class PowerSpectrum:
                 # Given star info data
                 numax = self.targets[target]["numax"]
                 dnu = self.targets[target]["dnu"]
-                # Default snr TODO: Change default value?
-                snr = 2
+                snr = 10
+
                 print(f"Processing target {target}...")
                 if self.flags["findex"]:
                     print("Finding excess...")
