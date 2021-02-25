@@ -5,149 +5,12 @@ A collection of utility functions used by SYD.py.
 from collections import deque
 from typing import Tuple, Union
 
-import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import numpy as np
 from astropy.convolution import (Box1DKernel, Gaussian1DKernel, convolve,
                                  convolve_fft)
 from scipy.special import erf
 
 from constants import *
-
-
-def set_plot_params() -> None:
-    """Sets plot styling and parameters."""
-
-    plt.style.use("dark_background")
-    plt.rcParams.update(
-        {
-            "agg.path.chunksize": 10000,
-            "mathtext.fontset": "stix",
-            "figure.autolayout": True,
-            "lines.linewidth": 1,
-            "axes.titlesize": 18.0,
-            "axes.labelsize": 16.0,
-            "axes.linewidth": 1.25,
-            "axes.formatter.useoffset": False,
-            "xtick.major.size": 10.0,
-            "xtick.minor.size": 5.0,
-            "xtick.major.width": 1.25,
-            "xtick.minor.width": 1.25,
-            "xtick.direction": "inout",
-            "ytick.major.size": 10.0,
-            "ytick.minor.size": 5.0,
-            "ytick.major.width": 1.25,
-            "ytick.minor.width": 1.25,
-            "ytick.direction": "inout",
-        }
-    )
-
-
-def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
-    """TODO: Figure out what this does"""
-    new_cmap = mcolors.LinearSegmentedColormap.from_list(
-        "trunc({name},{a:.2f},{b:.2f})".format(name=cmap.name, a=minval, b=maxval), cmap(np.linspace(minval, maxval, n))
-    )
-    return new_cmap
-
-
-def gaussian_bounds(x: np.ndarray, y: np.ndarray, best_x: float = None, sigma: float = None) -> Tuple:
-    """Generates parameter bounds on Gaussian functions.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        x data
-    y : np.ndarray
-        y data
-    best_x : float
-        TODO: Don't know
-    sigma : float
-        TODO: Don't know
-
-    Returns
-    -------
-    result : tuple
-        Gaussian bounds
-    """
-
-    if sigma is None:
-        sigma = (max(x) - min(x))/8.0/np.sqrt(8.0 * np.log(2.0))
-
-    b = np.zeros((2, 4)).tolist()
-    b[1][0] = np.inf
-    # TODO: This seems to imply that int(np.max()) will be None which would make the first assignment invalid
-    b[1][1] = 2.0*np.max(y)
-    if not int(np.max(y)):
-        b[1][1] = np.inf
-    if best_x is not None:
-        b[0][2] = 0.999 * best_x
-        b[1][2] = 1.001 * best_x
-    else:
-        b[0][2] = np.min(x)
-        b[1][2] = np.max(x)
-    b[0][3] = sigma
-    b[1][3] = np.max(x) - np.min(x)
-    return tuple(b)
-
-
-def max_elements(x: np.ndarray, y: np.ndarray, num_peaks: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Returns the first n peaks of y and its corresponding x co-ordinate.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        x data
-    y : np.ndarray
-        y data
-    num_peaks : int
-        the number of peaks
-
-    Returns
-    -------
-    peaks_x : np.ndarray
-        the x co-ordinates of the first n peaks of y
-    peaks_y : np.ndarray
-        the y co-ordinates of the first n peaks of y
-    """
-
-    s = np.argsort(y)
-    peaks_y = y[s][-int(num_peaks):][::-1]
-    peaks_x = x[s][-int(num_peaks):][::-1]
-
-    return peaks_x, peaks_y
-
-
-def return_max(array: np.ndarray, index: bool = False, dnu: bool = False, exp_dnu: float = None) -> Union[int, float]:
-    """Returns the min/max of the given array or its index.
-
-    Parameters
-    ----------
-    array : np.ndarray
-        array
-    index : bool
-        will return the index if true
-    dnu : bool
-        will find the minimum of the |array - estimated_dnu| as long as `exp_dnu` is not None
-    exp_dnu : float
-        expected deltanu
-
-    Returns
-    -------
-    result : Union[int, float]
-        either the min/max value or the index of the min/max value
-    """
-
-    if dnu and exp_dnu is not None:
-        lst = list(np.absolute(np.copy(array) - exp_dnu))
-        idx = lst.index(min(lst))
-    else:
-        lst = list(array)
-        idx = lst.index(max(lst))
-    if index:
-        return idx
-    else:
-        return lst[idx]
 
 
 ##########################################################################################
@@ -158,7 +21,9 @@ def return_max(array: np.ndarray, index: bool = False, dnu: bool = False, exp_dn
 
 
 def power_law(frequency, pars, compare=False, power=None, error=None):
-    """Power law model."""
+    """
+    Power law model.
+    """
 
     model = np.array([pars[0]/(f**pars[1]) for f in frequency])
     if compare:
@@ -168,8 +33,9 @@ def power_law(frequency, pars, compare=False, power=None, error=None):
 
 
 def lorentzian(_frequency, pars, _compare=False, _power=None, _error=None):
-    """Lorentzian model."""
-
+    """
+    Lorentzian model.
+    """
     model = np.array([pars])
 
     return model
@@ -190,11 +56,6 @@ def harvey(frequency, params, mode="regular", gaussian_model=False, total=False)
         flag to apply Gaussian skew to model
     total : bool
         flag that TODO: Not sure what this exactly means
-
-    Returns
-    -------
-    model : np.ndarray
-        Stellar background as approximated by a Harvey model
     """
 
     if gaussian_model:
@@ -228,7 +89,6 @@ def harvey(frequency, params, mode="regular", gaussian_model=False, total=False)
 def generate_model(frequency, pars, pars_errs, nyquist):
     """
     Generates model.
-    TODO: Does not seem to get called currently.
     """
 
     ps = np.zeros_like(frequency)
@@ -243,7 +103,7 @@ def generate_model(frequency, pars, pars_errs, nyquist):
             m += paras[j*2]/(1.0+(paras[(j*2)+1]*f)**2.0+(paras[(j*2)+1]*f)**4.0)
         m *= r
         m += pars[-1] + np.random.random_integers(-1, 1)*(pars[-1]/2.0)**(np.random.randn()-1.)
-        if m < 0.0:
+        if m < 0.:
             m = (10**(np.random.randn()))*r
         ps[i] = m
 
@@ -281,7 +141,7 @@ def gaussian(
 
 
 def harvey_one(frequency: np.ndarray, a1: float, b1: float, white_noise: float) -> np.ndarray:
-    """First Harvey component.
+    """First Harvey model.
 
     Parameters
     ----------
@@ -297,7 +157,7 @@ def harvey_one(frequency: np.ndarray, a1: float, b1: float, white_noise: float) 
     Returns
     -------
     model : np.ndarray
-        first Harvey component
+        first Harvey model
     """
 
     model = np.zeros_like(frequency)
@@ -309,7 +169,7 @@ def harvey_one(frequency: np.ndarray, a1: float, b1: float, white_noise: float) 
 
 
 def harvey_two(frequency: np.ndarray, a1: float, b1: float, a2: float, b2: float, white_noise: float) -> np.ndarray:
-    """Second Harvey component.
+    """Second Harvey model.
 
     Parameters
     ----------
@@ -329,7 +189,7 @@ def harvey_two(frequency: np.ndarray, a1: float, b1: float, a2: float, b2: float
     Returns
     -------
     model : np.ndarray
-        second Harvey component
+        second Harvey model
     """
 
     model = np.zeros_like(frequency)
@@ -351,111 +211,6 @@ def harvey_three(
         b3: float,
         white_noise: float
 ) -> np.ndarray:
-    """Third Harvey component.
-
-    Parameters
-    ----------
-    frequency : np.ndarray
-        power spectrum frequencies
-    a1 : float
-        represents `4 * sigma1**2 * tau1`
-    b1 : float
-        represents `2 * pi * tau1`
-    a2 : float
-        represents `4 * sigma2**2 * tau2`
-    b2 : float
-        represents `2 * pi * tau2`
-    a3 : float
-        represents `4 * sigma3**2 * tau3`
-    b3 : float
-        represents `2 * pi * tau3`
-    white_noise : float
-        white noise component
-
-    Returns
-    -------
-    model : np.ndarray
-        third Harvey component
-    """
-
-    model = np.zeros_like(frequency)
-
-    model += a1 / (1.0 + (b1 * frequency)**2.0 + (b1 * frequency)**4.0)
-    model += a2 / (1.0 + (b2 * frequency)**2.0 + (b2 * frequency)**4.0)
-    model += a3 / (1.0 + (b3 * frequency)**2.0 + (b3 * frequency)**4.0)
-    model += white_noise
-
-    return model
-
-
-def harvey_four(
-        frequency: np.ndarray,
-        a1: float,
-        b1: float,
-        a2: float,
-        b2: float,
-        a3: float,
-        b3: float,
-        a4: float,
-        b4: float,
-        white_noise: float
-) -> np.ndarray:
-    """Fourth Harvey component.
-
-    Parameters
-    ----------
-    frequency : np.ndarray
-        power spectrum frequencies
-    a1 : float
-        represents `4 * sigma1**2 * tau1`
-    b1 : float
-        represents `2 * pi * tau1`
-    a2 : float
-        represents `4 * sigma2**2 * tau2`
-    b2 : float
-        represents `2 * pi * tau2`
-    a3 : float
-        represents `4 * sigma3**2 * tau3`
-    b3 : float
-        represents `2 * pi * tau3`
-    a4 : float
-        represents `4 * sigma4**2 * tau4`
-    b4 : float
-        represents `2 * pi * tau4`
-    white_noise : float
-        white noise component
-
-    Returns
-    -------
-    model : np.ndarray
-        fourth Harvey component
-    """
-
-    model = np.zeros_like(frequency)
-
-    model += a1 / (1.0 + (b1 * frequency)**2.0 + (b1 * frequency)**4.0)
-    model += a2 / (1.0 + (b2 * frequency)**2.0 + (b2 * frequency)**4.0)
-    model += a3 / (1.0 + (b3 * frequency)**2.0 + (b3 * frequency)**4.0)
-    model += a4 / (1.0 + (b4 * frequency)**2.0 + (b4 * frequency)**4.0)
-    model += white_noise
-
-    return model
-
-
-def harvey_five(
-        frequency: np.ndarray,
-        a1: float,
-        b1: float,
-        a2: float,
-        b2: float,
-        a3: float,
-        b3: float,
-        a4: float,
-        b4: float,
-        a5: float,
-        b5: float,
-        white_noise: float
-) -> np.ndarray:
     """Third Harvey model.
 
     Parameters
@@ -474,21 +229,13 @@ def harvey_five(
         represents `4 * sigma3**2 * tau3`
     b3 : float
         represents `2 * pi * tau3`
-    a4 : float
-        represents `4 * sigma4**2 * tau4`
-    b4 : float
-        represents `2 * pi * tau4`
-    a5 : float
-        represents `4 * sigma5**2 * tau5`
-    b5 : float
-        represents `2 * pi * tau5`
     white_noise : float
         white noise component
 
     Returns
     -------
     model : np.ndarray
-        fifth Harvey component
+        third Harvey model
     """
 
     model = np.zeros_like(frequency)
@@ -496,76 +243,6 @@ def harvey_five(
     model += a1 / (1.0 + (b1 * frequency)**2.0 + (b1 * frequency)**4.0)
     model += a2 / (1.0 + (b2 * frequency)**2.0 + (b2 * frequency)**4.0)
     model += a3 / (1.0 + (b3 * frequency)**2.0 + (b3 * frequency)**4.0)
-    model += a4 / (1.0 + (b4 * frequency)**2.0 + (b4 * frequency)**4.0)
-    model += a5 / (1.0 + (b5 * frequency)**2.0 + (b5 * frequency)**4.0)
-    model += white_noise
-
-    return model
-
-
-def harvey_six(
-        frequency: np.ndarray,
-        a1: float,
-        b1: float,
-        a2: float,
-        b2: float,
-        a3: float,
-        b3: float,
-        a4: float,
-        b4: float,
-        a5: float,
-        b5: float,
-        a6: float,
-        b6: float,
-        white_noise: float
-) -> np.ndarray:
-    """Sixth Harvey component.
-
-    Parameters
-    ----------
-    frequency : np.ndarray
-        power spectrum frequencies
-    a1 : float
-        represents `4 * sigma1**2 * tau1`
-    b1 : float
-        represents `2 * pi * tau1`
-    a2 : float
-        represents `4 * sigma2**2 * tau2`
-    b2 : float
-        represents `2 * pi * tau2`
-    a3 : float
-        represents `4 * sigma3**2 * tau3`
-    b3 : float
-        represents `2 * pi * tau3`
-    a4 : float
-        represents `4 * sigma4**2 * tau4`
-    b4 : float
-        represents `2 * pi * tau4`
-    a5 : float
-        represents `4 * sigma5**2 * tau5`
-    b5 : float
-        represents `2 * pi * tau5`
-    a6 : float
-        represents `4 * sigma6**2 * tau6`
-    b6 : float
-        represents `2 * pi * tau6`
-    white_noise : float
-        white noise component
-
-    Returns
-    -------
-    model : np.ndarray
-        sixth Harvey component
-    """
-
-    model = np.zeros_like(frequency)
-
-    model += a1 / (1.0 + (b1 * frequency)**2.0 + (b1 * frequency)**4.0)
-    model += a2 / (1.0 + (b2 * frequency)**2.0 + (b2 * frequency)**4.0)
-    model += a3 / (1.0 + (b3 * frequency)**2.0 + (b3 * frequency)**4.0)
-    model += a4 / (1.0 + (b4 * frequency)**2.0 + (b4 * frequency)**4.0)
-    model += a5 / (1.0 + (b5 * frequency)**2.0 + (b5 * frequency)**4.0)
-    model += a6 / (1.0 + (b6 * frequency)**2.0 + (b6 * frequency)**4.0)
     model += white_noise
 
     return model
@@ -587,11 +264,13 @@ def gaussian_skew(frequency: np.ndarray, params: list) -> np.ndarray:
         Gaussian skew model
     """
 
-    _, amplitude, center, width = params
+    offset, amplitude, center, width = params
 
     model = np.array(
         [
-            2.0 * gaussian(f, *params) * 0.5
+            2.0
+            * gaussian(f, offset, amplitude, center, width)
+            * 0.5
             * (1.0 + erf(width * ((frequency - amplitude)/center)/np.sqrt(2.0))) for f in frequency
         ]
     )
@@ -748,26 +427,28 @@ def smooth(array, width, params, method="box", mode=None, fft=False, silent=Fals
     return smoothed_array
 
 
-# def max_elements(array, N, resolution, limit=[False, None]):
-#     """Returns the indices of the maximum elements."""
+def max_elements(array, N, resolution, limit=[False, None]):
+    """
+    Returns the indices of the maximum elements.
+    """
 
-#     indices = []
+    indices = []
 
-#     while len(indices) < N:
+    while len(indices) < N:
 
-#         new_max = max(array)
-#         idx = array.index(new_max)
-#         add = True
-#         if indices != [] and limit[0]:
-#             for index in indices:
-#                 if np.absolute((index - idx)*resolution) < limit[1]:
-#                     add = False
-#                     break
-#         if add:
-#             indices.append(idx)
-#         array[idx] = 0.
+        new_max = max(array)
+        idx = array.index(new_max)
+        add = True
+        if indices != [] and limit[0]:
+            for index in indices:
+                if np.absolute((index - idx)*resolution) < limit[1]:
+                    add = False
+                    break
+        if add:
+            indices.append(idx)
+        array[idx] = 0.
 
-#     return np.array(indices)
+    return np.array(indices)
 
 
 def smooth_gauss(array, fwhm, params, silent=False):

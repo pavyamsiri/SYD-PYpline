@@ -8,8 +8,9 @@ import pandas as pd
 
 
 def main():
-    """Concatenates results from the two submodules for each individual target into a single csv in Files/."""
-
+    """Concatenates results from the two submodules for each
+    individual target into a single csv in Files/.
+    """
     # Concatenating findex files i.e. find excess results
     path = "Files/results/**/*findex.csv"
     findex_files = glob.glob(path)
