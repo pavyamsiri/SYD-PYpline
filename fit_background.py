@@ -23,6 +23,11 @@ from constants import *
 from functions import *
 from target_data import TargetData
 
+
+class PlotData:
+    time = None
+
+
 ##########################################################################################
 #                                                                                        #
 #                                  FIT BACKGROUND ROUTINE                                #
